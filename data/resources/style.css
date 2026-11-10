@@ -1,0 +1,178 @@
+/* Elavo Files. Colors come from the GTK theme, so light and dark both
+ * follow it; only shape, spacing and a few alpha tints are set here. The
+ * layout follows System Settings: a sidebar column with the window buttons
+ * over it, and the toolbar over the content. */
+
+/* The sidebar column and its band in the title bar read as one surface,
+   a shade off the content, standing in for Finder's translucent sidebar. */
+.files-sidebar,
+.files-sidebar-band {
+  background-color: alpha(currentColor, 0.05);
+}
+
+.files-sidebar-band {
+  padding: 0 12px;
+  min-height: 52px;
+}
+
+.files-toolbar {
+  padding: 8px 10px 8px 12px;
+  min-height: 36px;
+  background-color: @theme_bg_color;
+}
+
+.files-title {
+  font-weight: bold;
+  font-size: 1.05em;
+  margin: 0 6px;
+}
+
+/* Capsules: Back/Forward, the view switcher, Share and More. */
+.files-pill {
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.10);
+  padding: 0 2px;
+}
+
+.files-pill > button,
+.files-pill > menubutton > button {
+  min-width: 34px;
+  min-height: 30px;
+  margin: 0;
+  padding: 0 4px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+}
+
+.files-pill > button:hover,
+.files-pill > menubutton > button:hover {
+  background-color: alpha(currentColor, 0.08);
+}
+
+.files-pill > button:checked {
+  background-color: alpha(currentColor, 0.16);
+}
+
+.files-pill > button:disabled image,
+.files-pill > menubutton > button:disabled image {
+  -gtk-icon-filter: opacity(0.45);
+}
+
+.files-round {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.10);
+  border: none;
+  box-shadow: none;
+}
+
+.files-toolbar entry.search {
+  min-height: 30px;
+  border-radius: 999px;
+}
+
+/* Sidebar */
+.files-sidebar list {
+  background: transparent;
+  padding: 0 10px 12px;
+}
+
+.files-sidebar row {
+  border-radius: 6px;
+  padding: 2px 8px;
+  min-height: 26px;
+}
+
+.files-sidebar row:selected {
+  background-color: alpha(currentColor, 0.12);
+  color: @theme_fg_color;
+}
+
+.files-sidebar row.files-section {
+  padding: 12px 8px 3px;
+  min-height: 0;
+  background: none;
+}
+
+.files-section-title {
+  font-size: 0.82em;
+  font-weight: bold;
+  color: alpha(currentColor, 0.5);
+}
+
+.files-sidebar row .files-place-icon {
+  color: var(--accent-color, @accent_color);
+}
+
+/* Icons view: Finder's look. The cell itself stays clear; a selected icon
+   gets a soft rounded backing and its name a filled capsule. */
+gridview.files-icons {
+  background: @view_bg_color;
+  padding: 12px;
+}
+
+gridview.files-icons > child {
+  padding: 6px 4px;
+  border-radius: 8px;
+  background: none;
+}
+
+gridview.files-icons > child:selected {
+  background: none;
+  color: @theme_fg_color;
+}
+
+.files-icon-picture {
+  padding: 4px;
+  border-radius: 8px;
+}
+
+gridview.files-icons > child:selected .files-icon-picture {
+  background-color: alpha(currentColor, 0.14);
+}
+
+.files-icon-name {
+  margin-top: 4px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 0.92em;
+}
+
+gridview.files-icons > child:selected .files-icon-name {
+  background-color: var(--accent-bg-color, @accent_bg_color);
+  color: var(--accent-fg-color, @accent_fg_color);
+}
+
+/* List view */
+columnview.files-list {
+  background: @view_bg_color;
+}
+
+columnview.files-list > listview > row {
+  min-height: 24px;
+}
+
+columnview.files-list > listview > row:nth-child(even) {
+  background-color: alpha(currentColor, 0.03);
+}
+
+columnview.files-list > listview > row:selected {
+  background-color: var(--accent-bg-color, @accent_bg_color);
+  color: var(--accent-fg-color, @accent_fg_color);
+}
+
+.files-dim {
+  color: alpha(currentColor, 0.62);
+}
+
+columnview.files-list > listview > row:selected .files-dim {
+  color: inherit;
+}
+
+.files-placeholder {
+  color: alpha(currentColor, 0.55);
+}

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/elavo-files-core",
+    "crates/elavo-files",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/elavo-io/elavo-files"
+
+[workspace.dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+gio = { version = "0.22", features = ["v2_74"] }
+glib-build-tools = "0.22"
+libc = "0.2"
+elavo-files-core = { path = "crates/elavo-files-core" }
+
+[profile.release]
+lto = "thin"
+strip = true

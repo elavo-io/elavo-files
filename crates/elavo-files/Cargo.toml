@@ -1,0 +1,15 @@
+[package]
+name = "elavo-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Elavo Files, a Finder-style file manager"
+
+[dependencies]
+gtk.workspace = true
+libc.workspace = true
+elavo-files-core.workspace = true
+
+[build-dependencies]
+glib-build-tools.workspace = true

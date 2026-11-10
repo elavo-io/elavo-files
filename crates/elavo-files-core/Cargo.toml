@@ -1,0 +1,10 @@
+[package]
+name = "elavo-files-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "File listing, places and formatting for Elavo Files, on GIO, without GTK"
+
+[dependencies]
+gio.workspace = true

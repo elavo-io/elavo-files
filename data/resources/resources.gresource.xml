@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/elavo/Files">
+    <file>style.css</file>
+    <file>icons/scalable/actions/elavo-files-view-columns-symbolic.svg</file>
+    <file>icons/scalable/actions/elavo-files-view-gallery-symbolic.svg</file>
+    <file>icons/scalable/actions/elavo-files-group-symbolic.svg</file>
+    <file>icons/scalable/actions/elavo-files-share-symbolic.svg</file>
+  </gresource>
+</gresources>
