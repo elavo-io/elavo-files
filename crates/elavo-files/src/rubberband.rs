@@ -95,6 +95,17 @@ pub fn attach(
         let adds = g
             .current_event_state()
             .intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK);
+        // A press between or below the items clears the selection, as in
+        // Finder. Claiming it now keeps the grid's own item gesture from
+        // selecting the nearest item when the button is released. In the
+        // list, the rest of a row still selects that row.
+        if !b.on_row(x, y) {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            b.view.grab_focus();
+            if !adds {
+                b.sel.unselect_all();
+            }
+        }
         b.anchor.set((x, y + b.offset()));
         b.pointer.set((x, y));
         b.base.replace(if adds {
@@ -131,25 +142,38 @@ impl Band {
         self.scroll.vadjustment().value()
     }
 
-    /// Empty space: not an item (in the list, not its icon or name, as
-    /// the rest of a row starts a rectangle too) and not the column titles.
+    /// Empty space: not an item's icon or name (in the list the rest of a
+    /// row starts a rectangle too) and not the column titles.
     fn on_empty_space(&self, x: f64, y: f64) -> bool {
-        let item = if self.view.is::<gtk::ColumnView>() {
-            views::GRAB
-        } else {
-            "files-cell"
-        };
         let mut w = self.view.pick(x, y, gtk::PickFlags::DEFAULT);
         while let Some(x) = w {
             if x == self.view {
                 return true;
             }
-            if x.has_css_class(item) || x.css_name() == "header" {
+            if x.has_css_class(views::GRAB) || x.css_name() == "header" {
                 return false;
             }
             w = x.parent();
         }
         true
+    }
+
+    /// On a list row, anywhere along it.
+    fn on_row(&self, x: f64, y: f64) -> bool {
+        if !self.view.is::<gtk::ColumnView>() {
+            return false;
+        }
+        let mut w = self.view.pick(x, y, gtk::PickFlags::DEFAULT);
+        while let Some(x) = w {
+            if x == self.view {
+                return false;
+            }
+            if x.css_name() == "row" {
+                return true;
+            }
+            w = x.parent();
+        }
+        false
     }
 
     fn start(self: &Rc<Self>) {

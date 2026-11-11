@@ -2,10 +2,11 @@
 //!
 //! ```ini
 //! [View]
-//! Mode=icons        # icons or list
+//! Mode=icons        # icons, list, columns or gallery
 //! IconSize=64       # 48, 64, 96 or 128 (Ctrl+plus, Ctrl+minus, Ctrl+0)
 //! ListIconSize=16   # 16, 24 or 32
 //! ShowHidden=false
+//! ShowPreview=false # the preview pane beside Icons and List
 //! [Window]
 //! Width=1100
 //! Height=680
@@ -38,6 +39,8 @@ fn save(file: &glib::KeyFile) {
 pub enum Mode {
     Icons,
     List,
+    Columns,
+    Gallery,
 }
 
 impl Mode {
@@ -45,6 +48,17 @@ impl Mode {
         match self {
             Mode::Icons => "icons",
             Mode::List => "list",
+            Mode::Columns => "columns",
+            Mode::Gallery => "gallery",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "list" => Mode::List,
+            "columns" => Mode::Columns,
+            "gallery" => Mode::Gallery,
+            _ => Mode::Icons,
         }
     }
 }
@@ -55,6 +69,7 @@ pub struct State {
     pub icon_size: i32,
     pub list_icon_size: i32,
     pub show_hidden: bool,
+    pub show_preview: bool,
     pub width: i32,
     pub height: i32,
 }
@@ -63,10 +78,7 @@ pub fn read() -> State {
     let f = load();
     let int = |g: &str, k: &str| f.integer(g, k).ok();
     State {
-        mode: match f.string("View", "Mode").ok().as_deref() {
-            Some("list") => Mode::List,
-            _ => Mode::Icons,
-        },
+        mode: Mode::from_id(f.string("View", "Mode").ok().as_deref().unwrap_or("")),
         icon_size: zoom::snap(
             &zoom::ICON_SIZES,
             int("View", "IconSize").unwrap_or(zoom::DEFAULT_ICON),
@@ -76,6 +88,7 @@ pub fn read() -> State {
             int("View", "ListIconSize").unwrap_or(zoom::DEFAULT_LIST),
         ),
         show_hidden: f.boolean("View", "ShowHidden").unwrap_or(false),
+        show_preview: f.boolean("View", "ShowPreview").unwrap_or(false),
         width: int("Window", "Width").unwrap_or(1100).clamp(640, 4000),
         height: int("Window", "Height").unwrap_or(680).clamp(420, 4000),
     }
@@ -87,7 +100,21 @@ pub fn write(state: &State) {
     f.set_integer("View", "IconSize", state.icon_size);
     f.set_integer("View", "ListIconSize", state.list_icon_size);
     f.set_boolean("View", "ShowHidden", state.show_hidden);
+    f.set_boolean("View", "ShowPreview", state.show_preview);
     f.set_integer("Window", "Width", state.width);
     f.set_integer("Window", "Height", state.height);
     save(&f);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_ids_round_trip() {
+        for mode in [Mode::Icons, Mode::List, Mode::Columns, Mode::Gallery] {
+            assert_eq!(Mode::from_id(mode.id()), mode);
+        }
+        assert_eq!(Mode::from_id("nonsense"), Mode::Icons);
+    }
 }

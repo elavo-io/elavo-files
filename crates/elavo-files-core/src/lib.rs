@@ -1,5 +1,5 @@
 //! The parts of Elavo Files that do not need GTK: how names sort, how
-//! sizes and dates read, the places in the sidebar, the attributes asked of
+//! sizes and dates read, the places in the sidebar and the Favorites, the attributes asked of
 //! GIO for each file, back/forward history, Finder's names for copies and
 //! aliases, the clipboard formats, the Trash, Elavo application bundles, and the
 //! file operations themselves.
@@ -10,6 +10,7 @@
 pub mod clipboard;
 pub mod eapp;
 pub mod entry;
+pub mod favorites;
 pub mod format;
 pub mod history;
 pub mod naming;

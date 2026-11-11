@@ -76,8 +76,12 @@ const ACCELS: &[(&str, &[&str])] = &[
     ("win.home", &["<Alt>Home", "<Control><Shift>h"]),
     ("win.view::icons", &["<Control>1"]),
     ("win.view::list", &["<Control>2"]),
+    ("win.view::columns", &["<Control>3"]),
+    ("win.view::gallery", &["<Control>4"]),
+    ("win.show-preview", &["<Control><Shift>p"]),
     ("win.show-hidden", &["<Control>h", "<Control><Shift>period"]),
     ("win.new-folder", &["<Control><Shift>n"]),
+    ("win.add-to-sidebar", &["<Control>t"]),
     (
         "win.zoom-in",
         &["<Control>plus", "<Control>equal", "<Control>KP_Add"],

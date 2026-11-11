@@ -29,6 +29,11 @@ const CUSTOM: [&str; 3] = ["custom-icon.png", "custom-icon.svg", "custom-icon.we
 const BUNDLED: [&str; 3] = ["standard-icon.png", "icon.png", "icon.svg"];
 /// Set on a `FileInfo` once looked at: "1" for a bundle, "0" otherwise.
 const MARK: &str = "elavo-files::eapp";
+/// "1" on a macOS application bundle, which Files shows as one item, as
+/// Finder does, though it can't start it.
+const PACKAGE: &str = "elavo-files::package";
+pub const MAC_SUFFIX: &str = ".app";
+pub const MAC_KIND: &str = "macOS Application";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -80,6 +85,14 @@ pub fn is_bundle(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with(SUFFIX) && n.len() > SUFFIX.len())
         && path.join("entry.json").is_file()
+}
+
+/// A macOS application: a folder named `*.app` with `Contents/Info.plist`.
+pub fn is_mac_app(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(MAC_SUFFIX) && n.len() > MAC_SUFFIX.len())
+        && path.join("Contents").join("Info.plist").is_file()
 }
 
 /// Inside `~/Applications` or the shared folder (or one of them).
@@ -224,15 +237,22 @@ pub fn decorate(info: &gio::FileInfo, themed: &dyn Fn(&str) -> bool) -> bool {
     if let Some(mark) = info.attribute_string(MARK) {
         return mark == "1";
     }
-    let bundle = info
-        .name()
-        .to_str()
-        .is_some_and(|n| n.ends_with(SUFFIX))
-        .then(|| crate::entry::file(info).and_then(|f| f.path()))
+    let is_dir = info.file_type() == gio::FileType::Directory;
+    let path = || crate::entry::file(info).and_then(|f| f.path());
+    let name = info.name();
+    let name = name.to_str().unwrap_or_default();
+    let bundle = (is_dir && name.ends_with(SUFFIX))
+        .then(path)
         .flatten()
-        .filter(|_| info.file_type() == gio::FileType::Directory)
         .and_then(|p| read(&p, themed));
     let Some(bundle) = bundle else {
+        // A macOS app keeps its name (renaming it must keep the .app) but
+        // shows as an application.
+        if is_dir && name.ends_with(MAC_SUFFIX) && path().is_some_and(|p| is_mac_app(&p)) {
+            info.set_icon(&gio::ThemedIcon::new(FALLBACK_ICON).upcast::<gio::Icon>());
+            crate::entry::set_kind(info, MAC_KIND);
+            info.set_attribute_string(PACKAGE, "1");
+        }
         info.set_attribute_string(MARK, "0");
         return false;
     };
@@ -246,6 +266,12 @@ pub fn decorate(info: &gio::FileInfo, themed: &dyn Fn(&str) -> bool) -> bool {
 /// Whether `decorate` found a bundle.
 pub fn is_marked(info: &gio::FileInfo) -> bool {
     info.attribute_string(MARK).is_some_and(|m| m == "1")
+}
+
+/// A folder shown as one item: an Elavo bundle or a macOS application.
+/// Columns previews it instead of opening it as a folder.
+pub fn is_package(info: &gio::FileInfo) -> bool {
+    is_marked(info) || info.attribute_string(PACKAGE).is_some_and(|m| m == "1")
 }
 
 #[cfg(test)]
@@ -265,6 +291,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn packages() {
+        let d = scratch("packages");
+        let b = bundle(&d, "Notes.eapp", r#"{"name": "Notes"}"#, "");
+        let mac = d.join("Safari.app");
+        std::fs::create_dir_all(mac.join("Contents")).unwrap();
+        std::fs::write(mac.join("Contents/Info.plist"), b"plist").unwrap();
+        let plain = d.join("Photos.app");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(is_mac_app(&mac) && !is_mac_app(&plain) && !is_mac_app(&b));
+
+        let info = |p: &Path| {
+            let file = gio::File::for_path(p);
+            let info = file
+                .query_info(
+                    "standard::*",
+                    gio::FileQueryInfoFlags::NONE,
+                    gio::Cancellable::NONE,
+                )
+                .unwrap();
+            info.set_attribute_object("standard::file", &file);
+            decorate(&info, &|_| false);
+            info
+        };
+        let (b, mac, plain) = (info(&b), info(&mac), info(&plain));
+        assert!(is_marked(&b) && is_package(&b));
+        assert_eq!(b.display_name(), "Notes");
+        assert!(!is_marked(&mac) && is_package(&mac));
+        assert_eq!(mac.display_name(), "Safari.app");
+        assert!(!is_package(&plain));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::{log, Window};
 use crate::i18n::tr;
 use crate::state::Mode;
 use crate::views::{self, CellHandler, View};
-use crate::{bundles, clip, dialogs, menus};
+use crate::{bundles, clip, dialogs, menus, sidebar};
 
 /// The last change, for Undo.
 pub enum Undo {
@@ -112,13 +112,16 @@ fn first_label(widget: &gtk::Widget) -> Option<gtk::Label> {
     None
 }
 
+/// Whether `widget` is part of an item: its icon or name in Icons and
+/// Columns, anywhere along its row in List.
 fn is_in_cell(widget: Option<gtk::Widget>, stop: &gtk::Widget) -> bool {
+    let list = stop.is::<gtk::ColumnView>();
     let mut w = widget;
     while let Some(x) = w {
         if &x == stop {
             return false;
         }
-        if x.has_css_class("files-cell") {
+        if x.has_css_class(views::GRAB) || (list && x.css_name() == "row") {
             return true;
         }
         w = x.parent();
@@ -131,13 +134,18 @@ impl Window {
         match self.state.get().mode {
             Mode::Icons => View::Icons,
             Mode::List => View::List,
+            Mode::Columns => View::Columns,
+            Mode::Gallery => View::Gallery,
         }
     }
 
-    fn sel_of(&self, view: View) -> &gtk::MultiSelection {
+    /// The selection of a view; in Columns, of the column in use.
+    fn sel_of(&self, view: View) -> gtk::MultiSelection {
         match view {
-            View::Icons => &self.grid_sel,
-            View::List => &self.list_sel,
+            View::Icons => self.grid_sel.clone(),
+            View::List => self.list_sel.clone(),
+            View::Columns => self.columns.sel(),
+            View::Gallery => self.gallery.sel.clone(),
         }
     }
 
@@ -145,6 +153,32 @@ impl Window {
         match view {
             View::Icons => self.grid.clone().upcast(),
             View::List => self.list.clone().upcast(),
+            View::Columns => self.columns.list().upcast(),
+            View::Gallery => self.gallery.strip.clone().upcast(),
+        }
+    }
+
+    /// The folder new and pasted files go to: the one shown, or in Columns
+    /// the folder of the column in use.
+    pub(super) fn here(&self) -> Option<gio::File> {
+        if self.state.get().mode == Mode::Columns {
+            return Some(self.columns.folder());
+        }
+        self.dir.file()
+    }
+
+    /// Bring the item at `pos` of a view into sight, with the focus on it.
+    fn scroll_to(&self, view: View, pos: u32) {
+        match view {
+            View::Icons => self.grid.scroll_to(pos, gtk::ListScrollFlags::FOCUS, None),
+            View::List => self.list.scroll_to(
+                pos,
+                None::<&gtk::ColumnViewColumn>,
+                gtk::ListScrollFlags::FOCUS,
+                None,
+            ),
+            View::Columns => self.columns.scroll_to(pos),
+            View::Gallery => self.gallery.scroll_to(pos),
         }
     }
 
@@ -157,7 +191,7 @@ impl Window {
     }
 
     /// The selected rows of the view in use, with their positions.
-    fn selected(&self) -> Vec<(u32, gio::FileInfo)> {
+    pub(super) fn selected(&self) -> Vec<(u32, gio::FileInfo)> {
         let sel = self.sel_of(self.view_kind());
         let set = sel.selection();
         (0..set.size())
@@ -172,12 +206,30 @@ impl Window {
 
     /// The file an operation acts on: the item itself in the Trash, what it
     /// points to elsewhere (Recents).
-    fn file_of(&self, info: &gio::FileInfo) -> Option<gio::File> {
+    pub(super) fn file_of(&self, info: &gio::FileInfo) -> Option<gio::File> {
         if self.in_trash() {
             entry::file(info)
         } else {
             entry::target(info)
         }
+    }
+
+    /// Add to Sidebar: the selected folders, or this folder when nothing is
+    /// selected.
+    fn sidebar_candidates(&self) -> Vec<gio::File> {
+        let selected = self.selected();
+        if selected.is_empty() {
+            return self
+                .here()
+                .into_iter()
+                .filter(|f| f.path().is_some())
+                .collect();
+        }
+        selected
+            .iter()
+            .filter(|(_, i)| entry::is_dir(i) && !eapp::is_package(i))
+            .filter_map(|(_, i)| entry::file(i))
+            .collect()
     }
 
     fn selected_files(&self) -> Vec<gio::File> {
@@ -224,6 +276,17 @@ impl Window {
             ("paste-move", writable && clip_files),
             ("new-folder", writable),
             ("empty-trash", trash_view),
+            (
+                "add-to-sidebar",
+                !trash_view
+                    && if any {
+                        selected
+                            .iter()
+                            .any(|(_, i)| entry::is_dir(i) && !eapp::is_package(i))
+                    } else {
+                        self.here().is_some_and(|f| f.path().is_some())
+                    },
+            ),
             ("undo", self.undo.borrow().is_some() && !self.jobs.running()),
             ("get-info", false),
             ("quick-look", false),
@@ -234,11 +297,72 @@ impl Window {
     }
 
     pub(super) fn connect_files(self: &Rc<Self>) {
-        for sel in [&self.grid_sel, &self.list_sel] {
+        let weak = Rc::downgrade(self);
+        self.columns.connect_change(move || {
+            if let Some(w) = weak.upgrade() {
+                w.update_actions();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.columns.connect_items(move || {
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(w) = weak.upgrade() {
+                    w.apply_pending();
+                }
+            });
+        });
+        let weak = Rc::downgrade(self);
+        self.columns.connect_background(move |widget, x, y| {
+            if let Some(w) = weak.upgrade() {
+                w.background_menu(widget, x, y);
+            }
+        });
+        // More… in a preview: the menu for what it shows.
+        let weak = Rc::downgrade(self);
+        let more = move |button: &gtk::Widget, pane: bool| {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            // The quick actions are at the bottom: the menu opens upwards.
+            let (x, y) = (button.width() as f64 / 2.0, 0.0);
+            w.update_actions();
+            if pane && w.selected().is_empty() {
+                w.show_menu(&menus::background(w.in_trash()), button, x, y);
+            } else {
+                w.show_menu(&w.items_menu(), button, x, y);
+            }
+        };
+        let m = more.clone();
+        self.columns.preview.connect_more(move |b| m(b, false));
+        let m = more.clone();
+        self.gallery.info.connect_more(move |b| m(b, false));
+        self.pane_preview.connect_more(move |b| more(b, true));
+        for preview in [
+            &self.columns.preview,
+            &self.gallery.info,
+            &self.pane_preview,
+        ] {
+            let weak = Rc::downgrade(self);
+            preview.connect_error(move |why| {
+                if let Some(w) = weak.upgrade() {
+                    dialogs::error(&w.window, &tr("Couldn\u{2019}t rotate the image."), &why);
+                }
+            });
+            // The file is written anew; keep it selected.
+            let weak = Rc::downgrade(self);
+            preview.connect_rotated(move |file| {
+                if let Some(w) = weak.upgrade() {
+                    w.select_when_listed(std::slice::from_ref(file), false);
+                }
+            });
+        }
+        for sel in [&self.grid_sel, &self.list_sel, &self.gallery.sel] {
             let weak = Rc::downgrade(self);
             sel.connect_selection_changed(move |_, _, _| {
                 if let Some(w) = weak.upgrade() {
                     w.update_actions();
+                    w.refresh_pane();
                 }
             });
             let weak = Rc::downgrade(self);
@@ -367,7 +491,7 @@ impl Window {
         if self.in_trash() {
             return Some(gio::File::for_uri(trash::URI));
         }
-        self.dir.file()
+        self.here()
     }
 
     pub(super) fn add_file_actions(self: &Rc<Self>) {
@@ -431,6 +555,12 @@ impl Window {
         );
         add("undo", Box::new(|w| w.undo()));
         add("context-menu", Box::new(|w| w.keyboard_menu()));
+        add(
+            "add-to-sidebar",
+            Box::new(|w| {
+                sidebar::add_folders(&w.sidebar_candidates());
+            }),
+        );
         // Later phases: Get Info (4), Quick Look (3), Share (LocalSend).
         add("get-info", Box::new(|_| {}));
         add("quick-look", Box::new(|_| {}));
@@ -502,6 +632,10 @@ impl Window {
             content_type: &ct,
             in_trash: self.in_trash(),
             bundle: selected.len() == 1 && first.is_some_and(eapp::is_marked),
+            folders: !self.in_trash()
+                && selected
+                    .iter()
+                    .any(|(_, i)| entry::is_dir(i) && !eapp::is_package(i)),
         })
     }
 
@@ -973,7 +1107,7 @@ impl Window {
         if !self.writable_here() {
             return;
         }
-        let Some(dest) = self.dir.file() else {
+        let Some(dest) = self.here() else {
             return;
         };
         let weak = Rc::downgrade(self);
@@ -1095,7 +1229,7 @@ impl Window {
             let Some(w) = weak.upgrade() else {
                 return;
             };
-            let here = w.dir.file();
+            let here = w.here();
             let missing = {
                 let p = w.pending.borrow();
                 p.generation == generation
@@ -1151,17 +1285,7 @@ impl Window {
         for pos in &found {
             sel.select_item(*pos, false);
         }
-        match view {
-            View::Icons => self
-                .grid
-                .scroll_to(found[0], gtk::ListScrollFlags::FOCUS, None),
-            View::List => self.list.scroll_to(
-                found[0],
-                None::<&gtk::ColumnViewColumn>,
-                gtk::ListScrollFlags::FOCUS,
-                None,
-            ),
-        }
+        self.scroll_to(view, found[0]);
         if found.len() >= uris.len() {
             self.pending.borrow_mut().uris.clear();
             if rename && found.len() == 1 {
@@ -1198,16 +1322,7 @@ impl Window {
         if tries == 0 {
             return;
         }
-        let view = self.view_kind();
-        match view {
-            View::Icons => self.grid.scroll_to(*pos, gtk::ListScrollFlags::FOCUS, None),
-            View::List => self.list.scroll_to(
-                *pos,
-                None::<&gtk::ColumnViewColumn>,
-                gtk::ListScrollFlags::FOCUS,
-                None,
-            ),
-        }
+        self.scroll_to(self.view_kind(), *pos);
         let weak = Rc::downgrade(self);
         glib::timeout_add_local_once(Duration::from_millis(80), move || {
             if let Some(w) = weak.upgrade() {
@@ -1287,7 +1402,7 @@ impl Window {
             }
         });
         popover.popup();
-        if self.view_kind() == View::List {
+        if matches!(self.view_kind(), View::List | View::Columns) {
             // A list row's name is left-aligned: line the field up with it
             // rather than centring it over the icon.
             let (p, label_width, h) = (popover.downgrade(), bounds.width(), h as i32);

@@ -18,6 +18,8 @@ use gtk::{gdk, gio, glib};
 pub enum View {
     Icons,
     List,
+    Columns,
+    Gallery,
 }
 
 /// What the window does for the cells.
@@ -79,7 +81,7 @@ impl Cells {
             .collect()
     }
 
-    fn bind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
+    pub fn bind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
         if let Some(file) = entry::file(info) {
             let mut map = self.widgets.borrow_mut();
             let list = map.entry(file.uri().to_string()).or_default();
@@ -88,7 +90,7 @@ impl Cells {
         }
     }
 
-    fn unbind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
+    pub fn unbind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
         if let Some(file) = entry::file(info) {
             let uri = file.uri().to_string();
             let mut map = self.widgets.borrow_mut();
@@ -159,7 +161,7 @@ fn item_info(item: &glib::WeakRef<gtk::ListItem>) -> Option<gio::FileInfo> {
 }
 
 /// The controllers every cell gets. `image` is the drag icon.
-fn wire(
+pub fn wire(
     cell: &gtk::Widget,
     item: &gtk::ListItem,
     cells: &Rc<Cells>,
@@ -184,7 +186,13 @@ fn wire(
         .button(gdk::BUTTON_SECONDARY)
         .build();
     let m = menu.clone();
+    let w = cell.downgrade();
     click.connect_pressed(move |g, _, x, y| {
+        // In Icons only the picture and the name are the item; around
+        // them is the folder's background.
+        if view == View::Icons && !w.upgrade().is_some_and(|w| on_grab(&w, x, y)) {
+            return;
+        }
         g.set_state(gtk::EventSequenceState::Claimed);
         m(x, y);
     });
@@ -201,7 +209,9 @@ fn wire(
         .build();
     let (c, it, w) = (cells.clone(), weak_item.clone(), cell.downgrade());
     drag.connect_prepare(move |_, x, y| {
-        if view == View::List && !w.upgrade().is_some_and(|w| on_grab(&w, x, y)) {
+        if matches!(view, View::Icons | View::List)
+            && !w.upgrade().is_some_and(|w| on_grab(&w, x, y))
+        {
             return None;
         }
         let (h, item) = (c.handler()?, it.upgrade()?);
@@ -232,7 +242,7 @@ fn wire(
     drop.set_preload(true);
     let it = weak_item.clone();
     drop.connect_accept(move |_, d| {
-        item_info(&it).is_some_and(|i| entry::is_dir(&i) && !elavo_files_core::eapp::is_marked(&i))
+        item_info(&it).is_some_and(|i| entry::is_dir(&i) && !elavo_files_core::eapp::is_package(&i))
             && d.formats().contains_type(gdk::FileList::static_type())
     });
     let (c, it) = (cells.clone(), weak_item.clone());
@@ -273,8 +283,17 @@ fn wire(
     cell.add_controller(drop);
 }
 
-/// Where a loaded thumbnail texture is kept on its `FileInfo`.
+/// Where a loaded thumbnail texture is kept on its `FileInfo`, and the
+/// size it was loaded for.
 const TEXTURE: &str = "elavo-files::texture";
+const TEXTURE_SIZE: &str = "elavo-files::texture-size";
+
+/// The pixels a picture shown at `size` is loaded at: enough for the
+/// screen's scale and one zoom step, and no more, so a big folder of
+/// photos doesn't keep hundreds of large textures around.
+fn load_size(image: &gtk::Image, size: i32) -> i32 {
+    (size * image.scale_factor().max(1) * 3 / 2).clamp(32, 256)
+}
 
 /// The `FileInfo` behind a row: the item itself in Icons, or the item of a
 /// `TreeListRow` in List.
@@ -285,66 +304,65 @@ pub fn info_of(object: &glib::Object) -> Option<gio::FileInfo> {
     object.clone().downcast::<gio::FileInfo>().ok()
 }
 
-fn thumbnail(info: &gio::FileInfo) -> Option<gdk::Texture> {
-    if let Some(obj) = info.attribute_object(TEXTURE) {
-        return obj.downcast::<gdk::Texture>().ok();
-    }
-    let path = entry::thumbnail(info)?;
-    let texture = gdk::Texture::from_filename(path).ok()?;
-    info.set_attribute_object(TEXTURE, &texture);
-    Some(texture)
-}
-
-/// Images without a cached thumbnail are scaled down here, off the main
-/// loop's critical path, up to this size of file.
-const PREVIEW_MAX_BYTES: u64 = 40_000_000;
-const PREVIEW_SIZE: i32 = 256;
-
-/// Load a small preview of an image file and show it once it is ready,
-/// if `image` still shows the same file.
-fn load_preview(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
-    let ct = entry::content_type(info);
-    if !ct.starts_with("image/") || entry::size(info) > PREVIEW_MAX_BYTES {
-        return;
-    }
+/// Load the picture of a file (a cached thumbnail, a scaled-down image or
+/// one a thumbnailer makes) and show it once it is ready, if `image` still
+/// shows the same file. Loads queue up, a few at a time, so a big folder
+/// lists at once and fills in its pictures afterwards.
+fn load_thumbnail(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
     let Some(file) = entry::target(info) else {
         return;
     };
     let uri = file.uri().to_string();
     image.set_widget_name(&uri);
-    let image = image.clone();
+    let want = load_size(image, size);
+    let weak = image.downgrade();
     let info = info.clone();
     glib::spawn_future_local(async move {
-        let Ok(stream) = file.read_future(glib::Priority::LOW).await else {
+        let wanted = || weak.upgrade().is_some_and(|i| i.widget_name() == uri);
+        let Some(texture) = crate::thumbs::texture(&file, Some(&info), want, &wanted).await else {
             return;
         };
-        let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(
-            &stream,
-            PREVIEW_SIZE,
-            PREVIEW_SIZE,
-            true,
-        )
-        .await
-        else {
-            return;
-        };
-        #[allow(deprecated)]
-        let texture = gdk::Texture::for_pixbuf(&pixbuf);
         info.set_attribute_object(TEXTURE, &texture);
-        if image.widget_name() == uri {
+        info.set_attribute_int32(TEXTURE_SIZE, want);
+        if let Some(image) = weak.upgrade().filter(|i| i.widget_name() == uri) {
             image.set_paintable(Some(&texture));
             image.set_pixel_size(size);
         }
     });
 }
 
-/// A cached thumbnail when there is one and the icon is big enough to show
-/// it, otherwise the themed icon for the file (folders get the theme's
-/// folder icon).
+/// Whether the icon theme really has `name`, as bundles need. A name counts
+/// only if its file is there: the icon cache can list Flatpak exports whose
+/// files are missing.
+pub fn themed(display: &gdk::Display) -> impl Fn(&str) -> bool {
+    let theme = gtk::IconTheme::for_display(display);
+    move |name: &str| {
+        theme.has_icon(name)
+            && theme
+                .lookup_icon(
+                    name,
+                    &[],
+                    64,
+                    1,
+                    gtk::TextDirection::Ltr,
+                    gtk::IconLookupFlags::empty(),
+                )
+                .file()
+                .and_then(|f| f.path())
+                .is_some_and(|p| p.exists())
+    }
+}
+
+/// The file's picture when it is big enough to show one, otherwise the
+/// themed icon for the file (folders get the theme's folder icon).
 pub fn set_icon(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
     image.set_pixel_size(size);
-    if size >= 24 {
-        if let Some(texture) = thumbnail(info) {
+    image.set_widget_name("");
+    if size >= 24 && info.attribute_int32(TEXTURE_SIZE) >= load_size(image, size) {
+        if let Some(texture) = info
+            .attribute_object(TEXTURE)
+            .and_then(|o| o.downcast::<gdk::Texture>().ok())
+        {
             image.set_paintable(Some(&texture));
             return;
         }
@@ -352,10 +370,9 @@ pub fn set_icon(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
     let icon = info
         .icon()
         .unwrap_or_else(|| gio::content_type_get_icon(&entry::content_type(info)));
-    image.set_widget_name("");
     image.set_from_gicon(&icon);
-    if size >= 48 {
-        load_preview(image, info, size);
+    if size >= 24 && !entry::is_dir(info) {
+        load_thumbnail(image, info, size);
     }
 }
 
@@ -368,7 +385,7 @@ pub fn icons_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory
         let image = gtk::Image::builder()
             .pixel_size(size)
             .halign(gtk::Align::Center)
-            .css_classes(["files-icon-picture"])
+            .css_classes(["files-icon-picture", GRAB])
             .build();
         let name = gtk::Label::builder()
             .wrap(true)
@@ -379,7 +396,7 @@ pub fn icons_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory
             .max_width_chars(((size + 40) / 7).max(11))
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Start)
-            .css_classes(["files-icon-name"])
+            .css_classes(["files-icon-name", GRAB])
             .build();
         // Break long names between characters without adding hyphens.
         let attrs = gtk::pango::AttrList::new();

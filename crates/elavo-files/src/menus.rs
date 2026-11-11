@@ -32,6 +32,8 @@ pub struct Selection<'a> {
     pub in_trash: bool,
     /// One application bundle (`.eapp`).
     pub bundle: bool,
+    /// A folder among them, for Add to Sidebar.
+    pub folders: bool,
 }
 
 fn quoted_or_count(s: &Selection) -> String {
@@ -149,6 +151,16 @@ pub fn items(s: &Selection) -> gio::Menu {
             item(&tr("Quick Look"), "win.quick-look", Some("space")),
         ]),
     );
+    if s.folders {
+        menu.append_section(
+            None,
+            &section(&[item(
+                &tr("Add to Sidebar"),
+                "win.add-to-sidebar",
+                Some("<Control>t"),
+            )]),
+        );
+    }
     menu.append_section(
         None,
         &section(&[
@@ -198,7 +210,17 @@ pub fn background(in_trash: bool) -> gio::Menu {
         &section(&[
             item(&tr("as Icons"), "win.view::icons", Some("<Control>1")),
             item(&tr("as List"), "win.view::list", Some("<Control>2")),
+            item(&tr("as Columns"), "win.view::columns", Some("<Control>3")),
+            item(&tr("as Gallery"), "win.view::gallery", Some("<Control>4")),
         ]),
+    );
+    view.append_section(
+        None,
+        &section(&[item(
+            &tr("Show Preview"),
+            "win.show-preview",
+            Some("<Control><Shift>p"),
+        )]),
     );
     view.append_section(
         None,

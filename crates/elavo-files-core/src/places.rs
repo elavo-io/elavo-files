@@ -10,7 +10,7 @@ pub struct Place {
     pub id: &'static str,
     pub uri: String,
     /// Music, Pictures, Videos, Public and Templates exist but stay out of
-    /// the sidebar until the person adds them (Files Settings, later).
+    /// the default Favorites; the person can add them (`favorites`).
     pub shown: bool,
 }
 
@@ -51,7 +51,8 @@ pub fn applications() -> Place {
     }
 }
 
-/// Applications, Desktop, Documents, Downloads, then the hidden ones.
+/// The default Favorites: Applications, Desktop, Documents, Downloads, then
+/// the hidden ones. What the sidebar shows is `favorites::load`.
 pub fn favorites() -> Vec<Place> {
     use glib::UserDirectory as D;
     let mut out = vec![applications()];
@@ -176,5 +177,10 @@ mod tests {
             p.id,
             "music" | "pictures" | "videos" | "public" | "templates"
         )));
+        // Finder's order, for the ones this system has.
+        let shown: Vec<_> = favs.iter().filter(|p| p.shown).map(|p| p.id).collect();
+        let order = ["applications", "desktop", "documents", "downloads"];
+        let expected: Vec<_> = order.iter().filter(|id| shown.contains(id)).collect();
+        assert_eq!(shown.iter().collect::<Vec<_>>(), expected);
     }
 }

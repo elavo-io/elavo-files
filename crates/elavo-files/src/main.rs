@@ -7,13 +7,17 @@
 mod app;
 mod bundles;
 mod clip;
+mod columns;
 mod dialogs;
+mod gallery;
 mod i18n;
 mod jobs;
 mod menus;
+mod preview;
 mod rubberband;
 mod sidebar;
 mod state;
+mod thumbs;
 mod titlebox;
 mod views;
 mod window;

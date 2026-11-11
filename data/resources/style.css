@@ -108,6 +108,74 @@
   color: var(--accent-color, @accent_color);
 }
 
+/* Favorites the person arranges: the line where a drop will go, a
+   favorite under a drop, and one being dragged or let go outside. */
+.files-sidebar row.files-favorite {
+  transition: opacity 180ms ease-out, background-color 120ms ease-out;
+}
+
+.files-sidebar row.files-fav-line-before,
+.files-sidebar row.files-fav-line-after {
+  border-radius: 0;
+}
+
+.files-sidebar row.files-fav-line-before {
+  box-shadow: inset 0 2px 0 0 var(--accent-color, @accent_color);
+}
+
+.files-sidebar row.files-fav-line-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent-color, @accent_color);
+}
+
+.files-sidebar row.files-fav-drop-into {
+  background-color: alpha(@accent_color, 0.28);
+}
+
+.files-sidebar row.files-fav-dragging {
+  opacity: 0.45;
+}
+
+.files-sidebar row.files-fav-leaving {
+  opacity: 0.15;
+}
+
+.files-sidebar row.files-fav-poof {
+  opacity: 0;
+  transition: opacity 220ms ease-in;
+}
+
+.files-fav-drag {
+  padding: 4px 10px;
+  border-radius: 8px;
+  background-color: alpha(@theme_bg_color, 0.92);
+  color: @theme_fg_color;
+  box-shadow: 0 2px 8px alpha(black, 0.35);
+  transition: opacity 160ms ease-out;
+}
+
+.files-fav-drag .files-place-icon {
+  color: var(--accent-color, @accent_color);
+}
+
+.files-fav-drag.files-fav-removing {
+  opacity: 0.75;
+}
+
+.files-fav-drag.files-fav-removing > image.files-place-icon,
+.files-fav-drag.files-fav-removing > label {
+  opacity: 0.45;
+}
+
+.files-fav-poof-hint {
+  margin-left: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background-color: alpha(#ff453a, 0.9);
+  color: white;
+  font-size: 0.85em;
+  font-weight: bold;
+}
+
 /* Icons view: Finder's look. The cell itself stays clear; a selected icon
    gets a soft rounded backing and its name a filled capsule. */
 gridview.files-icons {
@@ -316,4 +384,172 @@ popover.files-path-menu .files-path-row:hover {
   /* Lighter than the accent, so it shows over selected items too. */
   border: 1px solid color-mix(in srgb, var(--accent-bg-color, @accent_bg_color) 65%, white);
   border-radius: 3px;
+}
+
+/* Columns view: Finder's columns, a hairline between them. */
+.files-columns {
+  background: @view_bg_color;
+}
+
+.files-column {
+  border-right: 1px solid alpha(currentColor, 0.10);
+}
+
+listview.files-column-list {
+  background: @view_bg_color;
+  padding: 4px 0;
+}
+
+listview.files-column-list > row {
+  min-height: 22px;
+  margin: 0 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+}
+
+listview.files-column-list > row:selected {
+  background-color: alpha(currentColor, 0.14);
+  color: @theme_fg_color;
+}
+
+listview.files-column-list:focus-within > row:selected {
+  background-color: var(--accent-bg-color, @accent_bg_color);
+  color: var(--accent-fg-color, @accent_fg_color);
+}
+
+.files-column-chevron {
+  color: alpha(currentColor, 0.5);
+}
+
+listview.files-column-list > row:selected .files-column-chevron {
+  color: inherit;
+}
+
+listview.files-column-list .files-cell:drop(active) {
+  background-color: alpha(var(--accent-bg-color, @accent_bg_color), 0.35);
+  border-radius: 4px;
+}
+
+/* The edge that resizes a column. */
+.files-column-handle {
+  background: none;
+}
+
+.files-column-handle:hover {
+  background-color: alpha(currentColor, 0.08);
+}
+
+.files-columns-preview {
+  background: @view_bg_color;
+}
+
+/* A file's preview: picture, name, kind, details and quick actions. */
+.files-preview {
+  padding: 16px 18px 14px;
+}
+
+.files-preview-pane {
+  background: @view_bg_color;
+}
+
+.files-stage {
+  border-radius: 8px;
+}
+
+.files-preview .files-stage {
+  margin-bottom: 4px;
+}
+
+.files-stage-page,
+.files-stage-text {
+  background-color: alpha(currentColor, 0.04);
+  border-radius: 8px;
+  font-size: 0.85em;
+}
+
+.files-preview-name {
+  font-weight: bold;
+  font-size: 1.1em;
+}
+
+.files-preview-heading {
+  font-weight: bold;
+  margin-top: 2px;
+}
+
+.files-preview-info {
+  font-size: 0.92em;
+}
+
+.files-quick-actions {
+  margin-top: 8px;
+}
+
+button.files-quick-action {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background-color: alpha(currentColor, 0.10);
+}
+
+button.files-quick-action:hover {
+  background-color: alpha(currentColor, 0.16);
+}
+
+.files-quick-caption {
+  font-size: 0.8em;
+  color: alpha(currentColor, 0.7);
+}
+
+/* Gallery view */
+.files-gallery {
+  background: @view_bg_color;
+}
+
+.files-gallery-stage {
+  margin: 18px 18px 8px;
+}
+
+scrolledwindow.files-filmstrip-scroll {
+  border-top: 1px solid alpha(currentColor, 0.08);
+}
+
+listview.files-filmstrip {
+  background: none;
+  padding: 6px 10px;
+}
+
+listview.files-filmstrip > row {
+  padding: 4px;
+  margin: 0 2px;
+  border-radius: 7px;
+  background: none;
+}
+
+listview.files-filmstrip > row:hover {
+  background-color: alpha(currentColor, 0.06);
+}
+
+listview.files-filmstrip > row:selected {
+  background-color: alpha(currentColor, 0.10);
+  box-shadow: inset 0 0 0 2px var(--accent-bg-color, @accent_bg_color);
+}
+
+.files-gallery-info {
+  background: @view_bg_color;
+}
+
+/* Tooltips (the filmstrip's names, the toolbar's buttons): the theme's
+   colours, so the text reads in dark mode too. */
+tooltip.background {
+  background-color: @theme_bg_color;
+  color: @theme_fg_color;
+  border: 1px solid alpha(currentColor, 0.15);
+  border-radius: 6px;
+}
+
+tooltip.background label {
+  color: @theme_fg_color;
 }

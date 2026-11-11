@@ -1,5 +1,6 @@
 //! A Files window: the sidebar on the left with the window buttons over
-//! it, and on the right a toolbar over the folder, shown as Icons or List.
+//! it, and on the right a toolbar over the folder, shown as Icons, List,
+//! Columns or Gallery, with an optional preview pane beside Icons and List.
 //! The folder is a monitored `gtk::DirectoryList`, so it follows changes on
 //! disk as they happen. File operations, the context menus, the clipboard,
 //! drag and drop, Rename and Undo are in `fileops.rs`.
@@ -16,8 +17,11 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use crate::bundles;
+use crate::columns::Columns;
+use crate::gallery::Gallery;
 use crate::i18n::tr;
 use crate::jobs::Jobs;
+use crate::preview::Preview;
 use crate::rubberband;
 use crate::sidebar::{self, Sidebar};
 use crate::state::{self, Mode, State};
@@ -42,6 +46,11 @@ pub struct Window {
     list_sel: gtk::MultiSelection,
     list_scroll: gtk::ScrolledWindow,
     name_column: gtk::ColumnViewColumn,
+    columns: Rc<Columns>,
+    gallery: Rc<Gallery>,
+    /// Show Preview: the pane beside Icons and List.
+    pane: gtk::Revealer,
+    pane_preview: Rc<Preview>,
     stack: gtk::Stack,
     message: gtk::Label,
     title: Rc<TitleBox>,
@@ -90,6 +99,9 @@ fn more_menu() -> gio::Menu {
     zoom.append(Some(&tr("Make Icons Smaller")), Some("win.zoom-out"));
     zoom.append(Some(&tr("Default Icon Size")), Some("win.zoom-reset"));
     menu.append_section(None, &zoom);
+    let preview = gio::Menu::new();
+    preview.append(Some(&tr("Show Preview")), Some("win.show-preview"));
+    menu.append_section(None, &preview);
     menu
 }
 
@@ -177,15 +189,17 @@ impl Window {
             .action_name("win.view")
             .action_target(&"list".to_variant())
             .build();
-        let columns_btn = gtk::Button::builder()
+        let columns_btn = gtk::ToggleButton::builder()
             .icon_name("elavo-files-view-columns-symbolic")
             .tooltip_text(tr("Columns"))
-            .sensitive(false)
+            .action_name("win.view")
+            .action_target(&"columns".to_variant())
             .build();
-        let gallery_btn = gtk::Button::builder()
+        let gallery_btn = gtk::ToggleButton::builder()
             .icon_name("elavo-files-view-gallery-symbolic")
             .tooltip_text(tr("Gallery"))
-            .sensitive(false)
+            .action_name("win.view")
+            .action_target(&"gallery".to_variant())
             .build();
         for b in [icons_btn.upcast_ref::<gtk::Widget>(), list_btn.upcast_ref()] {
             views_pill.append(b);
@@ -268,24 +282,7 @@ impl Window {
         let filter = {
             let show_hidden = show_hidden.clone();
             let query = query.clone();
-            let theme = gtk::IconTheme::for_display(&WidgetExt::display(&window));
-            // A theme name counts only if it is a file that is there: the
-            // icon cache can list Flatpak exports whose files are missing.
-            let themed = move |name: &str| {
-                theme.has_icon(name)
-                    && theme
-                        .lookup_icon(
-                            name,
-                            &[],
-                            64,
-                            1,
-                            gtk::TextDirection::Ltr,
-                            gtk::IconLookupFlags::empty(),
-                        )
-                        .file()
-                        .and_then(|f| f.path())
-                        .is_some_and(|p| p.exists())
-            };
+            let themed = views::themed(&WidgetExt::display(&window));
             gtk::CustomFilter::new(move |obj| {
                 let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
                     return false;
@@ -321,7 +318,7 @@ impl Window {
         let child_filter = filter.clone();
         let tree = gtk::TreeListModel::new(filtered.clone(), false, false, move |obj| {
             let info = obj.downcast_ref::<gio::FileInfo>()?;
-            if !entry::is_dir(info) || eapp::is_marked(info) {
+            if !entry::is_dir(info) || eapp::is_package(info) {
                 return None;
             }
             // The folder is set when the row is first expanded (views.rs).
@@ -381,7 +378,39 @@ impl Window {
             &rubberband::attach(&list, &list_scroll, &list_sel, &cells),
             Some("list"),
         );
+        let columns_view = Columns::new(&filtered, &filter, &folder, &cells);
+        stack.add_named(&columns_view.root, Some("columns"));
+        let gallery = Gallery::new(&filtered, &cells);
+        stack.add_named(&gallery.root, Some("gallery"));
         stack.add_named(&message, Some("message"));
+
+        // Show Preview, beside Icons and List.
+        let pane_preview = Preview::new(Some(240));
+        let pane_box = gtk::Box::builder()
+            .width_request(280)
+            .css_classes(["files-preview-pane"])
+            .build();
+        pane_box.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        pane_box.append(
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .hexpand(true)
+                .child(&pane_preview.root)
+                .build(),
+        );
+        let pane = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideLeft)
+            .transition_duration(150)
+            .child(&pane_box)
+            .hexpand(false)
+            .visible(false)
+            .build();
+        // Out of the layout once it has slid away.
+        pane.connect_child_revealed_notify(|r| {
+            if !r.reveals_child() && !r.is_child_revealed() {
+                r.set_visible(false);
+            }
+        });
 
         let weak_open: Rc<RefCell<Option<std::rc::Weak<Window>>>> = Rc::default();
         let opener = weak_open.clone();
@@ -424,7 +453,10 @@ impl Window {
             .hexpand(true)
             .build();
         content.append(&trash_bar);
-        content.append(&stack);
+        let views_row = gtk::Box::builder().vexpand(true).build();
+        views_row.append(&stack);
+        views_row.append(&pane);
+        content.append(&views_row);
 
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&sidebar.widget);
@@ -444,6 +476,10 @@ impl Window {
             list_sel,
             list_scroll,
             name_column,
+            columns: columns_view,
+            gallery,
+            pane,
+            pane_preview,
             stack,
             message,
             title,
@@ -496,6 +532,18 @@ impl Window {
                 if let Some(info) = w.list_sel.item(pos).and_then(|o| views::info_of(&o)) {
                     w.open(&info);
                 }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.columns.connect_activate(move |info| {
+            if let Some(w) = weak.upgrade() {
+                w.open(info);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.gallery.connect_activate(move |info| {
+            if let Some(w) = weak.upgrade() {
+                w.open(info);
             }
         });
         let weak = Rc::downgrade(self);
@@ -587,10 +635,7 @@ impl Window {
             let (Some(w), Some(value)) = (weak.upgrade(), value) else {
                 return;
             };
-            let mode = match value.str() {
-                Some("list") => Mode::List,
-                _ => Mode::Icons,
-            };
+            let mode = Mode::from_id(value.str().unwrap_or(""));
             action.set_state(value);
             w.update(|s| s.mode = mode);
             w.show_view();
@@ -614,6 +659,55 @@ impl Window {
             w.filter.changed(gtk::FilterChange::Different);
         });
         self.window.add_action(&hidden);
+
+        let preview =
+            gio::SimpleAction::new_stateful("show-preview", None, &st.show_preview.to_variant());
+        let weak = Rc::downgrade(self);
+        preview.connect_activate(move |action, _| {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let on = !action
+                .state()
+                .and_then(|v| v.get::<bool>())
+                .unwrap_or(false);
+            action.set_state(&on.to_variant());
+            w.update(|s| s.show_preview = on);
+            w.show_pane();
+        });
+        self.window.add_action(&preview);
+    }
+
+    /// The preview pane is for Icons and List; Columns and Gallery have
+    /// their own.
+    fn show_pane(&self) {
+        let st = self.state.get();
+        let on = st.show_preview && matches!(st.mode, Mode::Icons | Mode::List);
+        if on {
+            self.pane.set_visible(true);
+        }
+        self.pane.set_reveal_child(on);
+        self.refresh_pane();
+    }
+
+    /// What the preview pane shows: the selected item, the folder when
+    /// nothing is selected, or how many items are.
+    fn refresh_pane(&self) {
+        if !self.pane.reveals_child() {
+            return;
+        }
+        let selected = self.selected();
+        match selected.as_slice() {
+            [] => match self.here() {
+                Some(folder) => self.pane_preview.show(&folder),
+                None => self.pane_preview.clear(),
+            },
+            [(_, info)] => match self.file_of(info) {
+                Some(file) => self.pane_preview.show(&file),
+                None => self.pane_preview.clear(),
+            },
+            more => self.pane_preview.show_count(more.len()),
+        }
     }
 
     fn rc(&self) -> Option<Rc<Self>> {
@@ -666,6 +760,8 @@ impl Window {
                         .set_factory(Some(&views::name_factory(size, &self.cells)));
                 }
             }
+            // Columns and Gallery have one size.
+            Mode::Columns | Mode::Gallery => {}
         }
     }
 
@@ -673,13 +769,23 @@ impl Window {
         match self.state.get().mode {
             Mode::Icons => self.grid.grab_focus(),
             Mode::List => self.list.grab_focus(),
+            Mode::Columns => {
+                self.columns.grab_focus();
+                true
+            }
+            Mode::Gallery => self.gallery.strip.grab_focus(),
         };
     }
 
     fn show_view(&self) {
-        self.stack
-            .set_visible_child_name(self.state.get().mode.id());
+        let mode = self.state.get().mode;
+        self.stack.set_visible_child_name(mode.id());
+        if mode == Mode::Gallery {
+            self.gallery.ensure_selection();
+        }
         self.focus_view();
+        self.show_pane();
+        self.update_actions();
     }
 
     /// Open a folder in this window, adding it to Back.
@@ -744,6 +850,8 @@ impl Window {
         drop(h);
         self.grid_scroll.vadjustment().set_value(0.0);
         self.list_scroll.vadjustment().set_value(0.0);
+        self.columns.set_root(file);
+        self.gallery.reset();
         self.show_view();
         self.update_actions();
     }
@@ -804,13 +912,22 @@ impl Window {
     }
 
     fn new_folder(self: &Rc<Self>) {
-        let Some(current) = self.dir.file() else {
+        let Some(current) = self.here() else {
             return;
         };
         let mut names = Vec::new();
-        for i in 0..self.dir.n_items() {
-            if let Some(info) = self.dir.item(i).and_downcast::<gio::FileInfo>() {
-                names.push(info.name().to_string_lossy().into_owned());
+        if self.state.get().mode == Mode::Columns {
+            let sel = self.columns.sel();
+            for i in 0..sel.n_items() {
+                if let Some(info) = sel.item(i).and_downcast::<gio::FileInfo>() {
+                    names.push(info.name().to_string_lossy().into_owned());
+                }
+            }
+        } else {
+            for i in 0..self.dir.n_items() {
+                if let Some(info) = self.dir.item(i).and_downcast::<gio::FileInfo>() {
+                    names.push(info.name().to_string_lossy().into_owned());
+                }
             }
         }
         let folder = current.child(format::new_folder_name(&names));
