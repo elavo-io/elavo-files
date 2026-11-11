@@ -42,6 +42,31 @@ fn load_css() {
     gtk::IconTheme::for_display(&display).add_resource_path("/io/elavo/Files/icons");
 }
 
+/// Follow the system light/dark choice (org.gnome.desktop.interface
+/// color-scheme), the same key System Settings writes, and keep following it.
+fn follow_color_scheme() {
+    let Some(source) = gio::SettingsSchemaSource::default() else {
+        return;
+    };
+    let Some(schema) = source.lookup("org.gnome.desktop.interface", true) else {
+        return;
+    };
+    if !schema.has_key("color-scheme") {
+        return;
+    }
+    let iface = gio::Settings::new("org.gnome.desktop.interface");
+    let apply = |iface: &gio::Settings| {
+        if let Some(gtk_settings) = gtk::Settings::default() {
+            let dark = iface.string("color-scheme") == "prefer-dark";
+            gtk_settings.set_gtk_application_prefer_dark_theme(dark);
+        }
+    };
+    apply(&iface);
+    iface.connect_changed(Some("color-scheme"), move |s, _| apply(s));
+    // Keep the settings object alive for the life of the app.
+    std::mem::forget(iface);
+}
+
 const ACCELS: &[(&str, &[&str])] = &[
     ("app.new-window", &["<Control>n"]),
     ("win.close", &["<Control>w"]),
@@ -70,6 +95,7 @@ pub fn run() -> glib::ExitCode {
         .build();
     app.connect_startup(|app| {
         load_css();
+        follow_color_scheme();
         for (action, accels) in ACCELS {
             app.set_accels_for_action(action, accels);
         }

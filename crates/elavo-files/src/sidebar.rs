@@ -1,6 +1,7 @@
 //! The sidebar: Recents, Favorites, and Locations (home, mounted drives,
 //! Network, Trash). Shared and LocalSend come in later phases. Mounted
-//! drives follow GIO's volume monitor.
+//! drives follow GIO's volume monitor. Folders, drives and the Trash take
+//! dropped files.
 
 use std::rc::Rc;
 
@@ -9,6 +10,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use crate::i18n::tr;
+use crate::views::{self, Cells};
 
 type OpenFn = Rc<dyn Fn(gio::File)>;
 
@@ -16,6 +18,7 @@ pub struct Sidebar {
     pub widget: gtk::ScrolledWindow,
     list: gtk::ListBox,
     monitor: gio::VolumeMonitor,
+    cells: Rc<Cells>,
 }
 
 /// The sidebar's name and symbolic icon for a fixed place.
@@ -76,6 +79,49 @@ fn section(title: &str) -> gtk::ListBoxRow {
     row
 }
 
+/// Files dropped on a row go into it; Recents and Network take none.
+fn take_drops(row: &gtk::ListBoxRow, uri: &str, cells: &Rc<Cells>) {
+    if uri.starts_with("recent:") || uri.starts_with("network:") {
+        return;
+    }
+    let drop = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+    );
+    drop.set_preload(true);
+    let dest = gio::File::for_uri(uri);
+    let (c, d) = (cells.clone(), dest.clone());
+    drop.connect_motion(move |t, _, _| {
+        let Some(h) = c.handler() else {
+            return gtk::gdk::DragAction::empty();
+        };
+        let files = t.value().map(|v| views::files_of(&v)).unwrap_or_default();
+        let offered = views::offered(t);
+        h.drop_action(&d, &files, views::force_copy(t), offered)
+    });
+    let c = cells.clone();
+    drop.connect_drop(move |t, value, _, _| {
+        let Some(h) = c.handler() else {
+            return false;
+        };
+        let files: Vec<gio::File> = views::files_of(value)
+            .into_iter()
+            .filter(|f| !f.equal(&dest))
+            .collect();
+        if files.is_empty() {
+            return false;
+        }
+        let offered = views::offered(t);
+        let action = h.drop_action(&dest, &files, views::force_copy(t), offered);
+        if action.is_empty() {
+            return false;
+        }
+        h.drop_files(&dest, files, action);
+        true
+    });
+    row.add_controller(drop);
+}
+
 fn item(name: &str, icon: &gio::Icon, uri: &str) -> gtk::ListBoxRow {
     let content = gtk::Box::builder().spacing(8).build();
     content.append(
@@ -99,13 +145,15 @@ fn item(name: &str, icon: &gio::Icon, uri: &str) -> gtk::ListBoxRow {
     row
 }
 
-fn place_row(place: &Place) -> gtk::ListBoxRow {
+fn place_row(place: &Place, cells: &Rc<Cells>) -> gtk::ListBoxRow {
     let (name, icon) = label(place.id);
-    item(&name, &gio::ThemedIcon::new(icon).upcast(), &place.uri)
+    let row = item(&name, &gio::ThemedIcon::new(icon).upcast(), &place.uri);
+    take_drops(&row, &place.uri, cells);
+    row
 }
 
 impl Sidebar {
-    pub fn new(open: OpenFn) -> Rc<Self> {
+    pub fn new(open: OpenFn, cells: Rc<Cells>) -> Rc<Self> {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .css_classes(["navigation-sidebar"])
@@ -126,6 +174,7 @@ impl Sidebar {
             widget,
             list,
             monitor: gio::VolumeMonitor::get(),
+            cells,
         });
         this.rebuild();
         let weak = Rc::downgrade(&this);
@@ -150,25 +199,28 @@ impl Sidebar {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
-        self.list.append(&place_row(&places::recents()));
+        self.list
+            .append(&place_row(&places::recents(), &self.cells));
 
         self.list.append(&section(&tr("Favorites")));
         for place in places::favorites().iter().filter(|p| p.shown) {
-            self.list.append(&place_row(place));
+            self.list.append(&place_row(place, &self.cells));
         }
 
         self.list.append(&section(&tr("Locations")));
-        self.list.append(&place_row(&places::home()));
+        self.list.append(&place_row(&places::home(), &self.cells));
         for mount in self.monitor.mounts() {
             if mount.is_shadowed() {
                 continue;
             }
             let uri = mount.root().uri().to_string();
-            self.list
-                .append(&item(&mount.name(), &mount.symbolic_icon(), &uri));
+            let row = item(&mount.name(), &mount.symbolic_icon(), &uri);
+            take_drops(&row, &uri, &self.cells);
+            self.list.append(&row);
         }
-        self.list.append(&place_row(&places::network()));
-        self.list.append(&place_row(&places::trash()));
+        self.list
+            .append(&place_row(&places::network(), &self.cells));
+        self.list.append(&place_row(&places::trash(), &self.cells));
     }
 
     /// Highlight the row for `uri`, or none when it is not in the sidebar.

@@ -58,6 +58,11 @@ pub fn kind(info: &gio::FileInfo) -> String {
     text
 }
 
+/// Set the Kind text ahead of time, such as `Application` for a bundle.
+pub fn set_kind(info: &gio::FileInfo, text: &str) {
+    info.set_attribute_string(KIND, text);
+}
+
 pub fn size(info: &gio::FileInfo) -> u64 {
     info.size().max(0) as u64
 }
@@ -80,13 +85,22 @@ pub fn size_text(info: &gio::FileInfo) -> String {
 
 /// The Date Modified column, in local time.
 pub fn modified_text(info: &gio::FileInfo) -> String {
-    let Some(local) = info
-        .modification_date_time()
-        .and_then(|d| d.to_local().ok())
-    else {
-        return format::NO_SIZE.to_owned();
-    };
-    let Ok(now) = gio::glib::DateTime::now_local() else {
+    match info.modification_date_time() {
+        Some(d) => date_time_text(&d),
+        None => format::NO_SIZE.to_owned(),
+    }
+}
+
+/// A Unix time the way the Date Modified column reads it.
+pub fn date_text(secs: i64) -> String {
+    match gio::glib::DateTime::from_unix_utc(secs) {
+        Ok(d) if secs > 0 => date_time_text(&d),
+        _ => format::NO_SIZE.to_owned(),
+    }
+}
+
+fn date_time_text(d: &gio::glib::DateTime) -> String {
+    let (Ok(local), Ok(now)) = (d.to_local(), gio::glib::DateTime::now_local()) else {
         return format::NO_SIZE.to_owned();
     };
     let ymd = |d: &gio::glib::DateTime| (d.year(), d.month() as u32, d.day_of_month() as u32);

@@ -1,21 +1,28 @@
 //! A Files window: the sidebar on the left with the window buttons over
 //! it, and on the right a toolbar over the folder, shown as Icons or List.
 //! The folder is a monitored `gtk::DirectoryList`, so it follows changes on
-//! disk as they happen.
+//! disk as they happen. File operations, the context menus, the clipboard,
+//! drag and drop, Rename and Undo are in `fileops.rs`.
+
+mod fileops;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use elavo_files_core::history::History;
 use elavo_files_core::sort::Key;
-use elavo_files_core::{entry, format, zoom};
+use elavo_files_core::{eapp, entry, format, trash, zoom};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
+use crate::bundles;
 use crate::i18n::tr;
+use crate::jobs::Jobs;
+use crate::rubberband;
 use crate::sidebar::{self, Sidebar};
 use crate::state::{self, Mode, State};
-use crate::views;
+use crate::titlebox::TitleBox;
+use crate::views::{self, CellHandler, Cells};
 
 /// The sidebar column, shared by its band in the title bar and the list.
 const SIDEBAR_WIDTH: i32 = 200;
@@ -37,13 +44,22 @@ pub struct Window {
     name_column: gtk::ColumnViewColumn,
     stack: gtk::Stack,
     message: gtk::Label,
-    title: gtk::Label,
+    title: Rc<TitleBox>,
     search_toggle: gtk::ToggleButton,
     search: gtk::SearchEntry,
     history: RefCell<History<String>>,
     state: Cell<State>,
     show_hidden: Rc<Cell<bool>>,
     query: Rc<RefCell<String>>,
+    cells: Rc<Cells>,
+    jobs: Rc<Jobs>,
+    /// The trash bar and the views, which popovers are parented to.
+    content: gtk::Box,
+    trash_bar: gtk::Revealer,
+    undo: RefCell<Option<fileops::Undo>>,
+    pending: RefCell<fileops::Pending>,
+    menu: RefCell<Option<gtk::PopoverMenu>>,
+    me: RefCell<std::rc::Weak<Window>>,
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -62,6 +78,9 @@ fn pill() -> gtk::Box {
 
 fn more_menu() -> gio::Menu {
     let menu = gio::Menu::new();
+    let undo = gio::Menu::new();
+    undo.append(Some(&tr("Undo")), Some("win.undo"));
+    menu.append_section(None, &undo);
     let first = gio::Menu::new();
     first.append(Some(&tr("New Folder")), Some("win.new-folder"));
     first.append(Some(&tr("Show Hidden Files")), Some("win.show-hidden"));
@@ -80,6 +99,7 @@ fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .hexpand(true)
         .vexpand(true)
         .child(child)
+        .css_classes(["files-scroll"])
         .build()
 }
 
@@ -132,12 +152,17 @@ impl Window {
         nav.append(&back);
         nav.append(&forward);
 
-        let title = gtk::Label::builder()
-            .css_classes(["files-title"])
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .build();
+        // Picking a folder in its path menu goes there; the window is made
+        // below, so it is reached through this cell.
+        let go_to: Rc<RefCell<Option<std::rc::Weak<Window>>>> = Rc::default();
+        let title = {
+            let go_to = go_to.clone();
+            TitleBox::new(move |file| {
+                if let Some(w) = go_to.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    w.go(file);
+                }
+            })
+        };
 
         let views_pill = pill();
         let icons_btn = gtk::ToggleButton::builder()
@@ -202,6 +227,7 @@ impl Window {
             .transition_type(gtk::RevealerTransitionType::SlideLeft)
             .child(&search)
             .build();
+        let jobs = Jobs::new(&window);
         let search_toggle = gtk::ToggleButton::builder()
             .icon_name("system-search-symbolic")
             .tooltip_text(tr("Search this folder"))
@@ -219,10 +245,11 @@ impl Window {
             .css_classes(["files-toolbar"])
             .build();
         toolbar.append(&nav);
-        toolbar.append(&title);
+        toolbar.append(&title.root);
         toolbar.append(&views_pill);
         toolbar.append(&group_pill);
         toolbar.append(&share_pill);
+        toolbar.append(&jobs.button);
         toolbar.append(&revealer);
         toolbar.append(&search_toggle);
         let end_controls = gtk::WindowControls::new(gtk::PackType::End);
@@ -241,10 +268,30 @@ impl Window {
         let filter = {
             let show_hidden = show_hidden.clone();
             let query = query.clone();
+            let theme = gtk::IconTheme::for_display(&WidgetExt::display(&window));
+            // A theme name counts only if it is a file that is there: the
+            // icon cache can list Flatpak exports whose files are missing.
+            let themed = move |name: &str| {
+                theme.has_icon(name)
+                    && theme
+                        .lookup_icon(
+                            name,
+                            &[],
+                            64,
+                            1,
+                            gtk::TextDirection::Ltr,
+                            gtk::IconLookupFlags::empty(),
+                        )
+                        .file()
+                        .and_then(|f| f.path())
+                        .is_some_and(|p| p.exists())
+            };
             gtk::CustomFilter::new(move |obj| {
                 let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
                     return false;
                 };
+                // Application bundles show as their app, once each.
+                eapp::decorate(info, &themed);
                 if !show_hidden.get() && entry::is_hidden(info) {
                     return false;
                 }
@@ -256,15 +303,16 @@ impl Window {
         dir.set_monitored(true);
         let filtered = gtk::FilterListModel::new(Some(dir.clone()), Some(filter.clone()));
 
+        let cells = Rc::new(Cells::default());
+
         // Icons
         let icon_sorted =
             gtk::SortListModel::new(Some(filtered.clone()), Some(views::sorter(Key::Name)));
         let grid_sel = gtk::MultiSelection::new(Some(icon_sorted));
         let grid = gtk::GridView::builder()
             .model(&grid_sel)
-            .factory(&views::icons_factory(st.icon_size))
+            .factory(&views::icons_factory(st.icon_size, &cells))
             .max_columns(40)
-            .enable_rubberband(true)
             .css_classes(["files-icons"])
             .build();
         let grid_scroll = scrolled(&grid);
@@ -273,7 +321,7 @@ impl Window {
         let child_filter = filter.clone();
         let tree = gtk::TreeListModel::new(filtered.clone(), false, false, move |obj| {
             let info = obj.downcast_ref::<gio::FileInfo>()?;
-            if !entry::is_dir(info) {
+            if !entry::is_dir(info) || eapp::is_marked(info) {
                 return None;
             }
             // The folder is set when the row is first expanded (views.rs).
@@ -284,12 +332,11 @@ impl Window {
         let list = gtk::ColumnView::builder()
             .reorderable(false)
             .show_row_separators(false)
-            .enable_rubberband(true)
             .css_classes(["files-list"])
             .build();
         let name_column = gtk::ColumnViewColumn::builder()
             .title(tr("Name"))
-            .factory(&views::name_factory(st.list_icon_size))
+            .factory(&views::name_factory(st.list_icon_size, &cells))
             .sorter(&views::sorter(Key::Name))
             .expand(true)
             .resizable(true)
@@ -297,7 +344,7 @@ impl Window {
         let column = |title: String, text: fn(&gio::FileInfo) -> String, key, width, xalign| {
             gtk::ColumnViewColumn::builder()
                 .title(title)
-                .factory(&views::text_factory(text, xalign))
+                .factory(&views::text_factory(text, xalign, &cells))
                 .sorter(&views::sorter(key))
                 .fixed_width(width)
                 .resizable(true)
@@ -326,26 +373,63 @@ impl Window {
             .css_classes(["files-placeholder"])
             .build();
         let stack = gtk::Stack::builder().hexpand(true).vexpand(true).build();
-        stack.add_named(&grid_scroll, Some("icons"));
-        stack.add_named(&list_scroll, Some("list"));
+        stack.add_named(
+            &rubberband::attach(&grid, &grid_scroll, &grid_sel, &cells),
+            Some("icons"),
+        );
+        stack.add_named(
+            &rubberband::attach(&list, &list_scroll, &list_sel, &cells),
+            Some("list"),
+        );
         stack.add_named(&message, Some("message"));
 
         let weak_open: Rc<RefCell<Option<std::rc::Weak<Window>>>> = Rc::default();
         let opener = weak_open.clone();
-        let sidebar = Sidebar::new(Rc::new(move |file| {
-            if let Some(w) = opener.borrow().as_ref().and_then(|w| w.upgrade()) {
-                w.go(file);
-            }
-        }));
+        let sidebar = Sidebar::new(
+            Rc::new(move |file| {
+                if let Some(w) = opener.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    w.go(file);
+                }
+            }),
+            cells.clone(),
+        );
         sidebar.widget.set_width_request(SIDEBAR_WIDTH);
         let columns = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
         columns.add_widget(&band);
         columns.add_widget(&sidebar.widget);
 
+        // Finder's Trash bar, with Empty.
+        let trash_box = gtk::Box::builder()
+            .spacing(8)
+            .css_classes(["files-trash-bar"])
+            .build();
+        trash_box.append(
+            &gtk::Label::builder()
+                .label(tr("Trash"))
+                .xalign(0.0)
+                .hexpand(true)
+                .css_classes(["files-dim"])
+                .build(),
+        );
+        trash_box.append(
+            &gtk::Button::builder()
+                .label(tr("Empty"))
+                .action_name("win.empty-trash")
+                .css_classes(["files-trash-empty"])
+                .build(),
+        );
+        let trash_bar = gtk::Revealer::builder().child(&trash_box).build();
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .hexpand(true)
+            .build();
+        content.append(&trash_bar);
+        content.append(&stack);
+
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&sidebar.widget);
         body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        body.append(&stack);
+        body.append(&content);
         window.set_child(Some(&body));
 
         let this = Rc::new(Self {
@@ -369,10 +453,30 @@ impl Window {
             state: Cell::new(st),
             show_hidden,
             query,
+            cells,
+            jobs,
+            content,
+            trash_bar,
+            undo: RefCell::default(),
+            pending: RefCell::default(),
+            menu: RefCell::default(),
+            me: RefCell::default(),
         });
+        this.me.replace(Rc::downgrade(&this));
         weak_open.replace(Some(Rc::downgrade(&this)));
+        go_to.replace(Some(Rc::downgrade(&this)));
+        let handler: std::rc::Weak<dyn CellHandler> = Rc::downgrade(&this) as _;
+        this.cells.set_handler(handler);
+        let weak = Rc::downgrade(&this);
+        this.jobs.set_refocus(move || {
+            if let Some(w) = weak.upgrade() {
+                w.focus_view();
+            }
+        });
         this.connect();
         this.add_actions();
+        this.connect_files();
+        this.add_file_actions();
         this.load(&folder);
         this
     }
@@ -512,6 +616,10 @@ impl Window {
         self.window.add_action(&hidden);
     }
 
+    fn rc(&self) -> Option<Rc<Self>> {
+        self.me.borrow().upgrade()
+    }
+
     fn update(&self, f: impl FnOnce(&mut State)) {
         let mut st = self.state.get();
         f(&mut st);
@@ -542,7 +650,8 @@ impl Window {
                 };
                 if size != st.icon_size {
                     self.update(|s| s.icon_size = size);
-                    self.grid.set_factory(Some(&views::icons_factory(size)));
+                    self.grid
+                        .set_factory(Some(&views::icons_factory(size, &self.cells)));
                 }
             }
             Mode::List => {
@@ -554,7 +663,7 @@ impl Window {
                 if size != st.list_icon_size {
                     self.update(|s| s.list_icon_size = size);
                     self.name_column
-                        .set_factory(Some(&views::name_factory(size)));
+                        .set_factory(Some(&views::name_factory(size, &self.cells)));
                 }
             }
         }
@@ -603,12 +712,29 @@ impl Window {
         if self.search_toggle.is_active() {
             self.search_toggle.set_active(false);
         }
-        self.dir.set_file(Some(file));
         let uri = file.uri().to_string();
+        let in_trash = trash::is_trash_uri(&uri);
+        if in_trash && !trash::gvfs() {
+            // No GVfs: list the home trash itself.
+            let files = trash::home().join("files");
+            let _ = std::fs::create_dir_all(&files);
+            self.dir.set_file(Some(&gio::File::for_path(files)));
+        } else {
+            self.dir.set_file(Some(file));
+        }
+        self.trash_bar.set_reveal_child(in_trash);
         let title = sidebar::place_title(&uri)
             .or_else(|| self.sidebar.mount_title(&uri))
             .unwrap_or_else(|| display_name(file));
-        self.title.set_label(&title);
+        let icon = file
+            .query_info(
+                "standard::icon",
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )
+            .ok()
+            .and_then(|i| i.icon());
+        self.title.set(&title, file, icon);
         self.window.set_title(Some(&title));
         self.sidebar.select_uri(&uri);
         let h = self.history.borrow();
@@ -619,6 +745,7 @@ impl Window {
         self.grid_scroll.vadjustment().set_value(0.0);
         self.list_scroll.vadjustment().set_value(0.0);
         self.show_view();
+        self.update_actions();
     }
 
     fn set_enabled(&self, name: &str, on: bool) {
@@ -637,6 +764,22 @@ impl Window {
         let Some(target) = entry::target(info) else {
             return;
         };
+        if eapp::is_marked(info) {
+            if let Some(path) = target.path() {
+                if let Err(why) = bundles::launch(&self.window, &path) {
+                    gtk::AlertDialog::builder()
+                        .message(format!(
+                            "{} \u{201c}{}\u{201d}",
+                            tr("Couldn't open"),
+                            entry::name(info)
+                        ))
+                        .detail(why)
+                        .build()
+                        .show(Some(&self.window));
+                }
+            }
+            return;
+        }
         if entry::is_dir(info) {
             self.go(target);
             return;
@@ -660,8 +803,10 @@ impl Window {
         );
     }
 
-    fn new_folder(&self) {
-        let current = gio::File::for_uri(self.history.borrow().current());
+    fn new_folder(self: &Rc<Self>) {
+        let Some(current) = self.dir.file() else {
+            return;
+        };
         let mut names = Vec::new();
         for i in 0..self.dir.n_items() {
             if let Some(info) = self.dir.item(i).and_downcast::<gio::FileInfo>() {
@@ -669,17 +814,26 @@ impl Window {
             }
         }
         let folder = current.child(format::new_folder_name(&names));
-        let window = self.window.clone();
+        let weak = Rc::downgrade(self);
+        let made = folder.clone();
         folder.make_directory_async(
             glib::Priority::DEFAULT,
             gio::Cancellable::NONE,
             move |result| {
-                if let Err(err) = result {
-                    gtk::AlertDialog::builder()
-                        .message(tr("Couldn't make a new folder here"))
-                        .detail(err.message())
-                        .build()
-                        .show(Some(&window));
+                let Some(w) = weak.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(()) => {
+                        w.set_undo(fileops::Undo::Created(vec![made.clone()]));
+                        // Finder names a new folder right away.
+                        w.select_when_listed(&[made], true);
+                    }
+                    Err(err) => crate::dialogs::error(
+                        &w.window,
+                        &tr("Couldn't make a new folder here"),
+                        err.message(),
+                    ),
                 }
             },
         );

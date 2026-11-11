@@ -10,9 +10,13 @@
 #
 # Files runs inside the elavo-dev toolbox on its own D-Bus session bus, so
 # it can't reach an instance in the real session, with settings in
-# $T/config (dark mode and the Elavo icon theme), not yours. The toolbox
-# has no GVfs, so Recents, Network and Trash don't open here; they do in
-# a real Elavo session. Nothing here needs root.
+# $T/config (dark mode, the Elavo theme and icons, Elavo's window button
+# layout), not yours. Its home is $T/home/$USER and its data folder is
+# $T/data, so Move to Trash goes to $T/data/Trash and never to your Trash. The toolbox has no GVfs, so
+# Recents and Network don't open here and Trash is read from that home
+# trash directly; all three use GVfs in a real Elavo session. Nothing
+# here needs root. ELAVO_SHARED_APPLICATIONS, if set, is passed on (the
+# toolbox sees /Applications as /run/host/Applications).
 
 set -euo pipefail
 
@@ -60,12 +64,23 @@ run)
     # private settings directory.
     mkdir -p "$T/config/gtk-4.0"
     [ -f "$HOME/.config/user-dirs.dirs" ] && cp "$HOME/.config/user-dirs.dirs" "$T/config/"
-    printf '[Settings]\ngtk-interface-color-scheme=dark\ngtk-application-prefer-dark-theme=true\ngtk-decoration-layout=close,minimize,maximize:\n' \
-        >"$T/config/gtk-4.0/settings.ini"
+    printf '[Settings]\ngtk-theme-name=%s\ngtk-icon-theme-name=%s\ngtk-interface-color-scheme=dark\ngtk-application-prefer-dark-theme=true\ngtk-decoration-layout=close,minimize,maximize:\n' \
+        "${GTK_THEME_NAME:-Elavo}" "${ICON_THEME_NAME:-Elavo}" >"$T/config/gtk-4.0/settings.ini"
+    # A private data folder (and so a private Trash), seeing your themes,
+    # icons and apps read-only through links.
+    mkdir -p "$T/data"
+    for d in themes icons applications; do
+        if [ -e "$HOME/.local/share/$d" ]; then ln -sfn "$HOME/.local/share/$d" "$T/data/$d"; fi
+    done
+    # A private home on the same tmpfs as /tmp, so Move to Trash works for
+    # scratch folders under /tmp (GLib only trashes files that are on the
+    # home's filesystem, or on a removable one).
+    H="$T/home/$USER"
+    for d in Desktop Documents Downloads Music Pictures Videos; do mkdir -p "$H/$d"; done
     # A private bus and private settings. Portals are off so nothing on the
     # private bus starts the real session's portal services.
     in_box env -u DBUS_SESSION_BUS_ADDRESS GDK_DEBUG=no-portals GTK_USE_PORTAL=0 \
-        GTK_A11Y=none ELAVO_FILES_LOG=1 XDG_CONFIG_HOME="$T/config" \
+        GTK_A11Y=none ELAVO_FILES_LOG=1 ${ELAVO_SHARED_APPLICATIONS:+ELAVO_SHARED_APPLICATIONS="$ELAVO_SHARED_APPLICATIONS"} HOME="$H" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" \
         dbus-run-session -- sh -c '
             gsettings set org.gnome.desktop.interface color-scheme prefer-dark
             gsettings set org.gnome.desktop.interface icon-theme Elavo
@@ -89,7 +104,7 @@ stop)
     rm -f "$T/socket" "$T/labwc.pid"
     ;;
 *)
-    sed -n '2,16p' "$0"
+    sed -n '2,21p' "$0"
     exit 1
     ;;
 esac

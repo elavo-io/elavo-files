@@ -1,12 +1,277 @@
 //! Cell factories and sorters for the Icons view (a `GridView`) and the
-//! List view (a `ColumnView` over a `TreeListModel`).
+//! List view (a `ColumnView` over a `TreeListModel`). Every cell carries
+//! the same controllers: right-click (or a long press on the touchscreen)
+//! for the context menu, a drag source for the item and, on folders, a
+//! drop target. What they do is up to the window, through [`CellHandler`].
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 
 use elavo_files_core::entry;
 use elavo_files_core::sort::{self, Key};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Icons,
+    List,
+}
+
+/// What the window does for the cells.
+pub trait CellHandler {
+    /// The context menu for the item at `position`, at `x, y` in `cell`.
+    fn item_menu(&self, view: View, position: u32, cell: &gtk::Widget, x: f64, y: f64);
+    /// The files a drag from the item at `position` carries.
+    fn drag_files(&self, view: View, position: u32) -> Vec<gio::File>;
+    /// Copy or move, for files dragged over `dest`.
+    fn drop_action(
+        &self,
+        dest: &gio::File,
+        files: &[gio::File],
+        force_copy: bool,
+        offered: gdk::DragAction,
+    ) -> gdk::DragAction;
+    fn drop_files(&self, dest: &gio::File, files: Vec<gio::File>, action: gdk::DragAction);
+}
+
+/// The cells on screen by file URI, for Rename to find its item, and the
+/// window's handler.
+#[derive(Default)]
+pub struct Cells {
+    // Both views bind the same files, so a uri can have a cell in each.
+    widgets: RefCell<HashMap<String, Vec<glib::WeakRef<gtk::Widget>>>>,
+    handler: RefCell<Option<Weak<dyn CellHandler>>>,
+}
+
+impl Cells {
+    pub fn set_handler(&self, handler: Weak<dyn CellHandler>) {
+        self.handler.replace(Some(handler));
+    }
+
+    pub fn handler(&self) -> Option<Rc<dyn CellHandler>> {
+        self.handler.borrow().as_ref().and_then(Weak::upgrade)
+    }
+
+    /// The bound cell showing `uri`, if it is on screen.
+    pub fn widget(&self, uri: &str) -> Option<gtk::Widget> {
+        self.widgets
+            .borrow()
+            .get(uri)?
+            .iter()
+            .filter_map(|w| w.upgrade())
+            .find(|w| w.is_mapped())
+    }
+
+    /// Every bound cell on screen, with its file's uri.
+    pub fn mapped(&self) -> Vec<(String, gtk::Widget)> {
+        self.widgets
+            .borrow()
+            .iter()
+            .flat_map(|(uri, list)| {
+                list.iter()
+                    .filter_map(|w| w.upgrade())
+                    .filter(|w| w.is_mapped())
+                    .map(move |w| (uri.clone(), w))
+            })
+            .collect()
+    }
+
+    fn bind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
+        if let Some(file) = entry::file(info) {
+            let mut map = self.widgets.borrow_mut();
+            let list = map.entry(file.uri().to_string()).or_default();
+            list.retain(|w| w.upgrade().is_some_and(|w| &w != widget));
+            list.push(widget.downgrade());
+        }
+    }
+
+    fn unbind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
+        if let Some(file) = entry::file(info) {
+            let uri = file.uri().to_string();
+            let mut map = self.widgets.borrow_mut();
+            if let Some(list) = map.get_mut(&uri) {
+                list.retain(|w| w.upgrade().is_some_and(|w| &w != widget));
+                if list.is_empty() {
+                    map.remove(&uri);
+                }
+            }
+        }
+    }
+}
+
+pub fn files_of(value: &glib::Value) -> Vec<gio::File> {
+    value
+        .get::<gdk::FileList>()
+        .map(|l| l.files())
+        .unwrap_or_default()
+}
+
+/// The class of the parts of a list row that pick its file up.
+pub const GRAB: &str = "files-grab";
+
+/// Whether `(x, y)` in `cell` is on its icon or name.
+pub fn on_grab(cell: &gtk::Widget, x: f64, y: f64) -> bool {
+    let mut w = cell.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(x) = w {
+        if x.has_css_class(GRAB) {
+            return true;
+        }
+        if &x == cell {
+            return false;
+        }
+        w = x.parent();
+    }
+    false
+}
+
+/// What the drag's source allows. On Wayland a drop's own actions are only
+/// the one the compositor settled on for the last place the pointer was, so
+/// passing over a row that wanted Copy would rule out Move everywhere after.
+/// A drag from Files itself says what it allows.
+pub fn offered(target: &gtk::DropTarget) -> gdk::DragAction {
+    let Some(drop) = target.current_drop() else {
+        return gdk::DragAction::COPY;
+    };
+    match drop.drag() {
+        Some(drag) => drag.actions(),
+        None => drop.actions(),
+    }
+}
+
+/// Ctrl or Alt (Finder's Option) held: copy instead of move. Wayland drag
+/// events carry no modifiers, so the keyboard's own state counts too.
+pub fn force_copy(target: &gtk::DropTarget) -> bool {
+    let keyboard = target
+        .widget()
+        .map(|w| w.display())
+        .and_then(|d| d.default_seat())
+        .and_then(|s| s.keyboard())
+        .map_or(gdk::ModifierType::empty(), |k| k.modifier_state());
+    (target.current_event_state() | keyboard)
+        .intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
+}
+
+fn item_info(item: &glib::WeakRef<gtk::ListItem>) -> Option<gio::FileInfo> {
+    item.upgrade()?.item().and_then(|o| info_of(&o))
+}
+
+/// The controllers every cell gets. `image` is the drag icon.
+fn wire(
+    cell: &gtk::Widget,
+    item: &gtk::ListItem,
+    cells: &Rc<Cells>,
+    view: View,
+    image: Option<&gtk::Image>,
+) {
+    cell.add_css_class("files-cell");
+    let weak_item = item.downgrade();
+
+    let menu = {
+        let (cells, item, cell) = (cells.clone(), weak_item.clone(), cell.downgrade());
+        move |x: f64, y: f64| {
+            let (Some(h), Some(item), Some(cell)) =
+                (cells.handler(), item.upgrade(), cell.upgrade())
+            else {
+                return;
+            };
+            h.item_menu(view, item.position(), &cell, x, y);
+        }
+    };
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .build();
+    let m = menu.clone();
+    click.connect_pressed(move |g, _, x, y| {
+        g.set_state(gtk::EventSequenceState::Claimed);
+        m(x, y);
+    });
+    cell.add_controller(click);
+    let press = gtk::GestureLongPress::builder().touch_only(true).build();
+    press.connect_pressed(move |g, x, y| {
+        g.set_state(gtk::EventSequenceState::Claimed);
+        menu(x, y);
+    });
+    cell.add_controller(press);
+
+    let drag = gtk::DragSource::builder()
+        .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
+        .build();
+    let (c, it, w) = (cells.clone(), weak_item.clone(), cell.downgrade());
+    drag.connect_prepare(move |_, x, y| {
+        if view == View::List && !w.upgrade().is_some_and(|w| on_grab(&w, x, y)) {
+            return None;
+        }
+        let (h, item) = (c.handler()?, it.upgrade()?);
+        let files = h.drag_files(view, item.position());
+        if files.is_empty() {
+            return None;
+        }
+        Some(gdk::ContentProvider::for_value(
+            &gdk::FileList::from_array(&files).to_value(),
+        ))
+    });
+    if let Some(image) = image {
+        let image = image.downgrade();
+        drag.connect_drag_begin(move |source, _| {
+            if let Some(image) = image.upgrade() {
+                let icon = gtk::WidgetPaintable::new(Some(&image));
+                source.set_icon(Some(&icon), image.width() / 2, image.height() / 2);
+            }
+        });
+    }
+    cell.add_controller(drag);
+
+    // Folders take drops.
+    let drop = gtk::DropTarget::new(
+        gdk::FileList::static_type(),
+        gdk::DragAction::COPY | gdk::DragAction::MOVE,
+    );
+    drop.set_preload(true);
+    let it = weak_item.clone();
+    drop.connect_accept(move |_, d| {
+        item_info(&it).is_some_and(|i| entry::is_dir(&i) && !elavo_files_core::eapp::is_marked(&i))
+            && d.formats().contains_type(gdk::FileList::static_type())
+    });
+    let (c, it) = (cells.clone(), weak_item.clone());
+    drop.connect_motion(move |t, _, _| {
+        let (Some(h), Some(info)) = (c.handler(), item_info(&it)) else {
+            return gdk::DragAction::empty();
+        };
+        let Some(dest) = entry::target(&info) else {
+            return gdk::DragAction::empty();
+        };
+        let files = t.value().map(|v| files_of(&v)).unwrap_or_default();
+        if files.iter().any(|f| f.equal(&dest)) {
+            return gdk::DragAction::empty();
+        }
+        let offered = offered(t);
+        h.drop_action(&dest, &files, force_copy(t), offered)
+    });
+    let (c, it) = (cells.clone(), weak_item);
+    drop.connect_drop(move |t, value, _, _| {
+        let (Some(h), Some(info)) = (c.handler(), item_info(&it)) else {
+            return false;
+        };
+        let Some(dest) = entry::target(&info) else {
+            return false;
+        };
+        let files: Vec<gio::File> = files_of(value)
+            .into_iter()
+            .filter(|f| !f.equal(&dest))
+            .collect();
+        if files.is_empty() {
+            return false;
+        }
+        let offered = offered(t);
+        let action = h.drop_action(&dest, &files, force_copy(t), offered);
+        h.drop_files(&dest, files, action);
+        true
+    });
+    cell.add_controller(drop);
+}
 
 /// Where a loaded thumbnail texture is kept on its `FileInfo`.
 const TEXTURE: &str = "elavo-files::texture";
@@ -95,8 +360,9 @@ pub fn set_icon(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
 }
 
 /// Icons view cells: the icon over a name of up to two lines.
-pub fn icons_factory(size: i32) -> gtk::SignalListItemFactory {
+pub fn icons_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let c = cells.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let image = gtk::Image::builder()
@@ -126,8 +392,10 @@ pub fn icons_factory(size: i32) -> gtk::SignalListItemFactory {
             .build();
         cell.append(&image);
         cell.append(&name);
+        wire(cell.upcast_ref(), item, &c, View::Icons, Some(&image));
         item.set_child(Some(&cell));
     });
+    let c = cells.clone();
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let (Some(info), Some(cell)) = (item.item().and_then(|o| info_of(&o)), item.child()) else {
@@ -145,6 +413,14 @@ pub fn icons_factory(size: i32) -> gtk::SignalListItemFactory {
         let text = entry::name(&info);
         name.set_label(&text);
         cell.set_tooltip_text(Some(&text));
+        c.bind(&info, &cell);
+    });
+    let c = cells.clone();
+    factory.connect_unbind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        if let (Some(info), Some(cell)) = (item.item().and_then(|o| info_of(&o)), item.child()) {
+            c.unbind(&info, &cell);
+        }
     });
     factory
 }
@@ -181,24 +457,34 @@ fn watch_expansion(row: &gtk::TreeListRow) {
 
 /// List view Name cells: a disclosure triangle for folders, the icon and
 /// the name.
-pub fn name_factory(size: i32) -> gtk::SignalListItemFactory {
+pub fn name_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let c = cells.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let content = gtk::Box::builder().spacing(6).build();
-        content.append(&gtk::Image::builder().pixel_size(size).build());
+        // Only the icon and the name pick the file up; a drag anywhere else
+        // in the row draws a selection rectangle, as in Finder.
+        let image = gtk::Image::builder()
+            .pixel_size(size)
+            .css_classes([GRAB])
+            .build();
+        content.append(&image);
         content.append(
             &gtk::Label::builder()
                 .xalign(0.0)
                 .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                .css_classes([GRAB])
                 .build(),
         );
         let expander = gtk::TreeExpander::builder()
             .child(&content)
             .indent_for_icon(true)
             .build();
+        wire(expander.upcast_ref(), item, &c, View::List, Some(&image));
         item.set_child(Some(&expander));
     });
+    let c = cells.clone();
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
@@ -223,10 +509,15 @@ pub fn name_factory(size: i32) -> gtk::SignalListItemFactory {
             .expect("label");
         set_icon(&image, &info, size);
         label.set_label(&entry::name(&info));
+        c.bind(&info, expander.upcast_ref());
     });
-    factory.connect_unbind(|_, item| {
+    let c = cells.clone();
+    factory.connect_unbind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         if let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() {
+            if let Some(info) = item.item().and_then(|o| info_of(&o)) {
+                c.unbind(&info, expander.upcast_ref());
+            }
             expander.set_list_row(None);
         }
     });
@@ -234,17 +525,22 @@ pub fn name_factory(size: i32) -> gtk::SignalListItemFactory {
 }
 
 /// A one-label column: Date Modified, Size or Kind.
-pub fn text_factory(text: fn(&gio::FileInfo) -> String, xalign: f32) -> gtk::SignalListItemFactory {
+pub fn text_factory(
+    text: fn(&gio::FileInfo) -> String,
+    xalign: f32,
+    cells: &Rc<Cells>,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
+    let c = cells.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        item.set_child(Some(
-            &gtk::Label::builder()
-                .xalign(xalign)
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .css_classes(["files-dim"])
-                .build(),
-        ));
+        let label = gtk::Label::builder()
+            .xalign(xalign)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["files-dim"])
+            .build();
+        wire(label.upcast_ref(), item, &c, View::List, None);
+        item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");

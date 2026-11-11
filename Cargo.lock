@@ -52,6 +52,8 @@ name = "elavo-files"
 version = "0.1.0"
 dependencies = [
  "elavo-files-core",
+ "futures-channel",
+ "futures-util",
  "glib-build-tools",
  "gtk4",
  "libc",

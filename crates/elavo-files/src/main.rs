@@ -5,9 +5,16 @@
 //! ```
 
 mod app;
+mod bundles;
+mod clip;
+mod dialogs;
 mod i18n;
+mod jobs;
+mod menus;
+mod rubberband;
 mod sidebar;
 mod state;
+mod titlebox;
 mod views;
 mod window;
 

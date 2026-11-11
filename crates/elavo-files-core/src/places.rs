@@ -35,16 +35,26 @@ pub fn recents() -> Place {
     }
 }
 
+/// The system-wide Applications folder Elavo installs into (`/Applications`,
+/// see `eapp::shared_dir`). `~/Applications` only when there is none.
+pub fn applications() -> Place {
+    let shared = crate::eapp::shared_dir();
+    let dir = if shared.is_dir() {
+        shared
+    } else {
+        crate::eapp::user_dir()
+    };
+    Place {
+        id: "applications",
+        uri: gio::File::for_path(dir).uri().to_string(),
+        shown: true,
+    }
+}
+
 /// Applications, Desktop, Documents, Downloads, then the hidden ones.
 pub fn favorites() -> Vec<Place> {
     use glib::UserDirectory as D;
-    let mut out = vec![Place {
-        id: "applications",
-        uri: gio::File::for_path(glib::home_dir().join("Applications"))
-            .uri()
-            .to_string(),
-        shown: true,
-    }];
+    let mut out = vec![applications()];
     out.extend(
         [
             special("desktop", D::Desktop, true),
@@ -86,9 +96,76 @@ pub fn trash() -> Place {
     }
 }
 
+/// The folder and the ones it is in, nearest first, up to the root. A place
+/// that is not on disk (Trash, Recents, Network) is only itself.
+pub fn ancestry(file: &gio::File) -> Vec<gio::File> {
+    let mut out = vec![file.clone()];
+    if file.path().is_none() {
+        return out;
+    }
+    let mut at = file.clone();
+    while let Some(parent) = at.parent() {
+        out.push(parent.clone());
+        at = parent;
+    }
+    out
+}
+
+/// A system file, the host's when running in a toolbox.
+fn system_file(path: &str) -> Option<String> {
+    std::fs::read_to_string(format!("/run/host{path}"))
+        .or_else(|_| std::fs::read_to_string(path))
+        .ok()
+}
+
+/// What the root drive is called, as Finder's "Macintosh HD": the system's
+/// name from os-release with "HD", or "File System".
+pub fn root_drive_name() -> String {
+    system_file("/etc/os-release")
+        .or_else(|| system_file("/usr/lib/os-release"))
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("NAME="))
+                .map(|v| v.trim().trim_matches('"').to_owned())
+        })
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("{n} HD"))
+        .unwrap_or_else(|| "File System".to_owned())
+}
+
+/// The computer's name: the pretty hostname, else the hostname.
+pub fn computer_name() -> String {
+    system_file("/etc/machine-info")
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("PRETTY_HOSTNAME="))
+                .map(|v| v.trim().trim_matches('"').to_owned())
+        })
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            system_file("/etc/hostname")
+                .map(|h| h.trim().to_owned())
+                .filter(|h| !h.is_empty())
+        })
+        .unwrap_or_else(|| glib::host_name().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestry_runs_to_the_root() {
+        let chain = ancestry(&gio::File::for_path("/home/kevin/Desktop"));
+        let paths: Vec<_> = chain.iter().map(|f| f.path().unwrap()).collect();
+        assert_eq!(
+            paths,
+            ["/home/kevin/Desktop", "/home/kevin", "/home", "/"].map(std::path::PathBuf::from)
+        );
+        assert_eq!(ancestry(&gio::File::for_uri("trash:///")).len(), 1);
+        assert!(!computer_name().is_empty());
+        assert!(root_drive_name().ends_with("HD") || root_drive_name() == "File System");
+    }
 
     #[test]
     fn favorites_start_with_applications() {
