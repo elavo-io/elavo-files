@@ -61,7 +61,7 @@ impl Default for Prefs {
             show_drives: true,
             show_network: true,
             show_trash: true,
-            show_localsend: false,
+            show_localsend: true,
             show_extensions: true,
             warn_empty_trash: true,
             confirm_delete: true,

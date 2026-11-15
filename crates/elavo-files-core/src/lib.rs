@@ -14,6 +14,7 @@ pub mod entry;
 pub mod favorites;
 pub mod format;
 pub mod history;
+pub mod localsend;
 pub mod naming;
 pub mod ops;
 pub mod places;

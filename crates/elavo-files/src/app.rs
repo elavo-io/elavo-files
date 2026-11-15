@@ -123,11 +123,39 @@ const ACCELS: &[(&str, &[&str])] = &[
     ("app.settings", &["<Control>comma"]),
 ];
 
+thread_local! {
+    /// Started with --localsend-daemon: stay running with no window.
+    static DAEMON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DAEMON_HOLD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
+}
+
 pub fn run() -> glib::ExitCode {
     let app = gtk::Application::builder()
         .application_id(crate::APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
+    app.add_main_option(
+        "localsend-daemon",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Receive with LocalSend in the background, with no window",
+        None,
+    );
+    app.connect_handle_local_options(|app, options| {
+        if options.contains("localsend-daemon") {
+            if let Err(e) = app.register(gio::Cancellable::NONE) {
+                eprintln!("elavo-files: {e}");
+                return std::ops::ControlFlow::Break(glib::ExitCode::FAILURE);
+            }
+            if app.is_remote() {
+                // Files is running already, and receiving with it.
+                return std::ops::ControlFlow::Break(glib::ExitCode::SUCCESS);
+            }
+            DAEMON.with(|d| d.set(true));
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     app.connect_startup(|app| {
         load_css();
         follow_color_scheme();
@@ -149,10 +177,25 @@ pub fn run() -> glib::ExitCode {
             crate::settings::present(parent.as_ref());
         });
         app.add_action(&settings);
+        let ls_settings = gio::SimpleAction::new("localsend-settings", None);
+        let a = app.downgrade();
+        ls_settings.connect_activate(move |_, _| {
+            let parent = a.upgrade().and_then(|a| a.active_window());
+            crate::settings::present_tab(parent.as_ref(), "localsend");
+        });
+        app.add_action(&ls_settings);
         crate::settings::get();
         follow_settings();
+        crate::localsend::start(app);
     });
-    app.connect_activate(|app| open_window(app, None));
+    app.connect_activate(|app| {
+        if DAEMON.with(|d| d.replace(false)) {
+            // Receive until the session ends; windows come and go.
+            DAEMON_HOLD.with(|h| h.replace(Some(app.hold())));
+            return;
+        }
+        open_window(app, None)
+    });
     app.connect_open(|app, files, _| {
         for file in files {
             open_window(app, Some(file.clone()));

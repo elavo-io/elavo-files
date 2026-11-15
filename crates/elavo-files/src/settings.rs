@@ -223,6 +223,9 @@ fn sidebar_page() -> gtk::Box {
         check(&tr("Trash"), p.show_trash, |on| {
             update(|p| p.show_trash = on)
         }),
+        check(&tr("LocalSend"), p.show_localsend, |on| {
+            update(|p| p.show_localsend = on)
+        }),
     ];
     for (i, c) in items.iter().enumerate() {
         locs.attach(c, (i % 2) as i32, (i / 2) as i32, 1, 1);
@@ -230,15 +233,186 @@ fn sidebar_page() -> gtk::Box {
     g.append(&locs);
     page.append(&g);
 
-    let g = group();
-    g.append(&heading(&tr("Shared")));
-    let localsend = check(&tr("LocalSend"), p.show_localsend, |on| {
-        update(|p| p.show_localsend = on)
-    });
-    localsend.set_tooltip_text(Some(&tr("Sharing with LocalSend comes in a later version")));
-    g.append(&localsend);
-    page.append(&g);
     page
+}
+
+/// LocalSend: the device's name and how it receives. Meant to move to
+/// System Settings' General section; both would edit `localsend.conf`.
+fn localsend_page() -> gtk::Box {
+    use crate::localsend;
+    let c = localsend::config();
+    let page = page();
+    let g = group();
+    let row = gtk::Box::builder().spacing(10).build();
+    row.append(
+        &gtk::Label::builder()
+            .label(tr("Device name:"))
+            .xalign(0.0)
+            .build(),
+    );
+    // The computer's own name, from System Settings: one name everywhere.
+    let alias = gtk::Label::builder()
+        .label(&c.alias)
+        .xalign(0.0)
+        .hexpand(true)
+        .selectable(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["files-ls-alias"])
+        .build();
+    row.append(&alias);
+    let change = gtk::Button::with_label(&tr("Change in System Settings\u{2026}"));
+    change.set_visible(localsend::can_open_name_settings());
+    change.connect_clicked(|b| {
+        localsend::open_name_settings(b.root().and_downcast::<gtk::Window>().as_ref());
+    });
+    row.append(&change);
+    g.append(&row);
+    let note = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["files-dim"])
+        .build();
+    let own = gtk::Button::builder()
+        .label(tr("Use This Computer\u{2019}s Name"))
+        .halign(gtk::Align::Start)
+        .build();
+    own.connect_clicked(|_| localsend::use_system_name());
+    let show = {
+        let (alias, note, own) = (alias.downgrade(), note.downgrade(), own.downgrade());
+        move || {
+            let (Some(alias), Some(note), Some(own)) =
+                (alias.upgrade(), note.upgrade(), own.upgrade())
+            else {
+                return false;
+            };
+            let c = localsend::config();
+            alias.set_label(&c.alias);
+            let custom = c.custom_alias.is_some();
+            note.set_label(&if custom {
+                tr("Set in localsend.conf instead of this computer\u{2019}s name.")
+            } else {
+                tr("This computer\u{2019}s name, as devices nearby see it.")
+            });
+            own.set_visible(custom);
+            true
+        }
+    };
+    show();
+    localsend::connect_changed(show);
+    g.append(&note);
+    g.append(&own);
+    page.append(&g);
+
+    let g = group();
+    g.append(&check(
+        &tr("Receive files from devices nearby"),
+        c.receive,
+        |on| {
+            let mut c = localsend::config();
+            c.receive = on;
+            localsend::configure(c);
+        },
+    ));
+    g.append(&check(
+        &tr("Ask before accepting files"),
+        c.require_approval,
+        |on| {
+            let mut c = localsend::config();
+            c.require_approval = on;
+            localsend::configure(c);
+        },
+    ));
+    let row = gtk::Box::builder().spacing(10).build();
+    row.append(
+        &gtk::Label::builder()
+            .label(tr("Save files to:"))
+            .xalign(0.0)
+            .build(),
+    );
+    let folder_name = |p: &std::path::Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string_lossy().into_owned())
+    };
+    let folder = gtk::Button::builder()
+        .label(folder_name(&c.save_folder))
+        .tooltip_text(c.save_folder.to_string_lossy())
+        .hexpand(true)
+        .build();
+    folder.connect_clicked(move |b| {
+        let dialog = gtk::FileDialog::builder()
+            .title(tr("Save Files To"))
+            .initial_folder(&gio::File::for_path(localsend::config().save_folder))
+            .modal(true)
+            .build();
+        let parent = b.root().and_downcast::<gtk::Window>();
+        let b = b.clone();
+        dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |r| {
+            if let Some(path) = r.ok().and_then(|f| f.path()) {
+                b.set_label(&folder_name(&path));
+                b.set_tooltip_text(Some(&path.to_string_lossy()));
+                let mut c = localsend::config();
+                c.save_folder = path;
+                localsend::configure(c);
+            }
+        });
+    });
+    row.append(&folder);
+    g.append(&row);
+    let row = gtk::Box::builder().spacing(10).build();
+    row.append(&gtk::Label::builder().label(tr("PIN:")).xalign(0.0).build());
+    let pin = gtk::PasswordEntry::builder()
+        .placeholder_text(tr("None"))
+        .show_peek_icon(true)
+        .hexpand(true)
+        .build();
+    pin.set_text(&c.pin);
+    pin.connect_changed(|e| {
+        let mut c = localsend::config();
+        c.pin = e.text().trim().to_owned();
+        localsend::configure(c);
+    });
+    row.append(&pin);
+    g.append(&row);
+    page.append(&g);
+    let status = gtk::Label::builder()
+        .label(localsend::status())
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["files-dim"])
+        .build();
+    let s = status.downgrade();
+    localsend::connect_changed(move || match s.upgrade() {
+        Some(s) => {
+            s.set_label(&localsend::status());
+            true
+        }
+        None => false,
+    });
+    page.append(&status);
+    page
+}
+
+fn select_tab(window: &gtk::Window, tab: &str) {
+    if tab.is_empty() {
+        return;
+    }
+    let Some(tabs) = window
+        .titlebar()
+        .and_downcast::<gtk::HeaderBar>()
+        .and_then(|h| h.title_widget())
+    else {
+        return;
+    };
+    let mut child = tabs.first_child();
+    while let Some(w) = child {
+        if w.widget_name() == tab {
+            if let Ok(b) = w.clone().downcast::<gtk::ToggleButton>() {
+                b.set_active(true);
+            }
+        }
+        child = w.next_sibling();
+    }
 }
 
 fn advanced_page() -> gtk::Box {
@@ -280,7 +454,14 @@ fn tab(icon: &str, label: &str) -> (gtk::ToggleButton, gtk::Box) {
 
 /// Show the Settings window, making it the first time.
 pub fn present(parent: Option<&gtk::Window>) {
+    present_tab(parent, "");
+}
+
+/// Show the Settings window on a tab: general, sidebar, localsend or
+/// advanced; empty for the one last shown.
+pub fn present_tab(parent: Option<&gtk::Window>, which: &str) {
     if let Some(w) = WINDOW.with(|w| w.borrow().upgrade()) {
+        select_tab(&w, which);
         w.present();
         return;
     }
@@ -302,6 +483,7 @@ pub fn present(parent: Option<&gtk::Window>) {
     let on_hidden: std::rc::Rc<dyn Fn(bool)> = std::rc::Rc::new(crate::app::set_show_hidden);
     stack.add_named(&general_page(on_hidden), Some("general"));
     stack.add_named(&sidebar_page(), Some("sidebar"));
+    stack.add_named(&localsend_page(), Some("localsend"));
     stack.add_named(&advanced_page(), Some("advanced"));
 
     let tabs = gtk::Box::builder()
@@ -312,6 +494,7 @@ pub fn present(parent: Option<&gtk::Window>) {
     for (id, icon, label) in [
         ("general", "preferences-system-symbolic", tr("General")),
         ("sidebar", "sidebar-show-symbolic", tr("Sidebar")),
+        ("localsend", "network-wireless-symbolic", tr("LocalSend")),
         (
             "advanced",
             "applications-engineering-symbolic",
@@ -319,6 +502,7 @@ pub fn present(parent: Option<&gtk::Window>) {
         ),
     ] {
         let (button, _) = tab(icon, &label);
+        button.set_widget_name(id);
         if let Some(f) = &first {
             button.set_group(Some(f));
         } else {
@@ -361,5 +545,6 @@ pub fn present(parent: Option<&gtk::Window>) {
     ));
     window.add_controller(keys);
     WINDOW.with(|w| w.borrow().set(Some(&window)));
+    select_tab(&window, which);
     window.present();
 }

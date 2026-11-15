@@ -1,5 +1,5 @@
 //! The sidebar: Recents, Favorites, and Locations (home, mounted drives,
-//! Network, Trash). Shared and LocalSend come in later phases. Mounted
+//! Network, LocalSend with the devices nearby, Trash). Mounted
 //! drives follow GIO's volume monitor. Folders, drives and the Trash take
 //! dropped files.
 //!
@@ -421,6 +421,16 @@ impl Sidebar {
         let r = refresh.clone();
         this.monitor.connect_mount_removed(move |_, _| r());
         this.monitor.connect_mount_changed(move |_, _| refresh());
+        let weak = Rc::downgrade(&this);
+        crate::localsend::connect_changed(move || match weak.upgrade() {
+            Some(s) => {
+                if crate::settings::get().show_localsend {
+                    s.refresh();
+                }
+                true
+            }
+            None => false,
+        });
         this.add_actions();
         this.take_favorite_drops();
         this.watch_file();
@@ -563,17 +573,11 @@ impl Sidebar {
             self.list
                 .append(&place_row(&places::network(), &self.cells));
         }
+        if prefs.show_localsend {
+            self.append_localsend();
+        }
         if prefs.show_trash {
             self.list.append(&place_row(&places::trash(), &self.cells));
-        }
-        if prefs.show_localsend {
-            // A placeholder: sharing with LocalSend comes later.
-            self.list.append(&section(&tr("Shared")));
-            let icon: gio::Icon = gio::ThemedIcon::new("network-wireless-symbolic").upcast();
-            let row = item(&tr("LocalSend"), &icon, "");
-            row.set_sensitive(false);
-            row.set_tooltip_text(Some(&tr("Sharing with LocalSend comes in a later version")));
-            self.list.append(&row);
         }
     }
 
@@ -1013,6 +1017,39 @@ impl Sidebar {
         });
         popover.popup();
         self.menu.replace(Some(popover));
+    }
+
+    /// LocalSend, and under it the devices nearby, which take dropped
+    /// files.
+    fn append_localsend(&self) {
+        let icon: gio::Icon = gio::ThemedIcon::new("network-wireless-symbolic").upcast();
+        let row = item(&tr("LocalSend"), &icon, crate::localsend::URI);
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        drop.connect_drop(|t, value, _, _| {
+            let files = views::files_of(value);
+            let parent = t
+                .widget()
+                .and_then(|w| w.root())
+                .and_downcast::<gtk::Window>();
+            crate::localsend::pick_and_send(parent.as_ref(), files);
+            true
+        });
+        row.add_controller(drop);
+        self.list.append(&row);
+        for d in crate::localsend::devices() {
+            let icon: gio::Icon =
+                gio::ThemedIcon::new(crate::localsend::device_icon(d.kind)).upcast();
+            let uri = format!("{}device/{}", crate::localsend::URI, d.fingerprint);
+            let row = item(&d.alias, &icon, &uri);
+            row.add_css_class("files-ls-device-row");
+            row.set_tooltip_text(Some(&format!(
+                "{} \u{2014} {}",
+                d.alias,
+                tr("drop files here to send them")
+            )));
+            crate::localsend::take_drops(&row, &d.fingerprint);
+            self.list.append(&row);
+        }
     }
 
     /// Highlight the row for `uri`, or none when it is not in the sidebar.

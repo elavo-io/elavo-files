@@ -24,6 +24,7 @@ use crate::jobs::Jobs;
 use crate::preview::Preview;
 use crate::quicklook::QuickLook;
 use crate::rubberband;
+use crate::search;
 use crate::sidebar::{self, Sidebar};
 use crate::state::{self, Mode, State};
 use crate::titlebox::TitleBox;
@@ -54,11 +55,25 @@ pub struct Window {
     pane_preview: Rc<Preview>,
     /// Quick Look, over the folder.
     quicklook: Rc<QuickLook>,
+    /// The LocalSend view: devices nearby.
+    _localsend: Rc<crate::localsend::Page>,
     stack: gtk::Stack,
     message: gtk::Label,
     title: Rc<TitleBox>,
     search_toggle: gtk::ToggleButton,
     search: gtk::SearchEntry,
+    /// The folder's listing, or search results in its place.
+    filtered: gtk::FilterListModel,
+    results: gio::ListStore,
+    search_job: RefCell<Option<glib::JoinHandle<()>>>,
+    search_progress: RefCell<Option<Rc<search::Progress>>>,
+    /// Search Home rather than the folder shown.
+    scope_home: Cell<bool>,
+    scope_bar: gtk::Revealer,
+    scope_here: gtk::ToggleButton,
+    search_status: gtk::Label,
+    search_spinner: gtk::Spinner,
+    location_column: gtk::ColumnViewColumn,
     history: RefCell<History<String>>,
     state: Cell<State>,
     show_hidden: Rc<Cell<bool>>,
@@ -227,8 +242,8 @@ impl Window {
         share_pill.append(
             &gtk::Button::builder()
                 .icon_name("elavo-files-share-symbolic")
-                .tooltip_text(tr("Share"))
-                .sensitive(false)
+                .tooltip_text(tr("Send with LocalSend"))
+                .action_name("win.share")
                 .build(),
         );
         share_pill.append(
@@ -241,7 +256,8 @@ impl Window {
 
         let search = gtk::SearchEntry::builder()
             .placeholder_text(tr("Search"))
-            .width_chars(12)
+            .search_delay(250)
+            .width_chars(14)
             .valign(gtk::Align::Center)
             .build();
         let revealer = gtk::Revealer::builder()
@@ -251,7 +267,7 @@ impl Window {
         let jobs = Jobs::new(&window);
         let search_toggle = gtk::ToggleButton::builder()
             .icon_name("system-search-symbolic")
-            .tooltip_text(tr("Search this folder"))
+            .tooltip_text(tr("Search"))
             .valign(gtk::Align::Center)
             .css_classes(["files-round"])
             .build();
@@ -364,6 +380,15 @@ impl Window {
         ));
         list.append_column(&column(tr("Size"), entry::size_text, Key::Size, 90, 1.0));
         list.append_column(&column(tr("Kind"), entry::kind, Key::Kind, 170, 0.0));
+        // Where each result is, while searching.
+        let location_column = gtk::ColumnViewColumn::builder()
+            .title(tr("Location"))
+            .factory(&views::text_factory(search::location, 0.0, &cells))
+            .fixed_width(220)
+            .resizable(true)
+            .visible(false)
+            .build();
+        list.append_column(&location_column);
         let list_sorted =
             gtk::SortListModel::new(Some(tree), Some(gtk::TreeListRowSorter::new(list.sorter())));
         let list_sel = gtk::MultiSelection::new(Some(list_sorted));
@@ -390,6 +415,8 @@ impl Window {
         let gallery = Gallery::new(&filtered, &cells);
         stack.add_named(&gallery.root, Some("gallery"));
         stack.add_named(&message, Some("message"));
+        let localsend_page = crate::localsend::Page::new();
+        stack.add_named(&localsend_page.root, Some("localsend"));
 
         // Show Preview, beside Icons and List.
         let pane_preview = Preview::new(Some(240));
@@ -455,11 +482,45 @@ impl Window {
                 .build(),
         );
         let trash_bar = gtk::Revealer::builder().child(&trash_box).build();
+
+        // Finder's search scope: Home or the folder shown.
+        let scope_box = gtk::Box::builder()
+            .spacing(8)
+            .css_classes(["files-scope-bar"])
+            .build();
+        scope_box.append(
+            &gtk::Label::builder()
+                .label(tr("Search:"))
+                .css_classes(["files-dim"])
+                .build(),
+        );
+        let scope_home_btn = gtk::ToggleButton::builder()
+            .label(tr("Home"))
+            .active(true)
+            .css_classes(["files-scope"])
+            .build();
+        let scope_here = gtk::ToggleButton::builder()
+            .label("")
+            .group(&scope_home_btn)
+            .css_classes(["files-scope"])
+            .build();
+        scope_box.append(&scope_home_btn);
+        scope_box.append(&scope_here);
+        let search_spinner = gtk::Spinner::new();
+        let search_status = gtk::Label::builder()
+            .xalign(1.0)
+            .hexpand(true)
+            .css_classes(["files-dim"])
+            .build();
+        scope_box.append(&search_status);
+        scope_box.append(&search_spinner);
+        let scope_bar = gtk::Revealer::builder().child(&scope_box).build();
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .hexpand(true)
             .build();
         content.append(&trash_bar);
+        content.append(&scope_bar);
         let views_row = gtk::Box::builder().vexpand(true).build();
         views_row.append(&stack);
         views_row.append(&pane);
@@ -494,11 +555,22 @@ impl Window {
             pane,
             pane_preview,
             quicklook,
+            _localsend: localsend_page,
             stack,
             message,
             title,
             search_toggle,
             search,
+            filtered: filtered.clone(),
+            results: gio::ListStore::new::<gio::FileInfo>(),
+            search_job: RefCell::default(),
+            search_progress: RefCell::default(),
+            scope_home: Cell::new(true),
+            scope_bar,
+            scope_here: scope_here.clone(),
+            search_status,
+            search_spinner,
+            location_column,
             history: RefCell::new(History::new(folder.uri().to_string())),
             state: Cell::new(st),
             show_hidden,
@@ -575,8 +647,23 @@ impl Window {
         let weak = Rc::downgrade(self);
         self.search.connect_search_changed(move |entry| {
             if let Some(w) = weak.upgrade() {
-                w.query.replace(entry.text().to_lowercase());
+                let text = entry.text().trim().to_lowercase();
+                w.query.replace(text.clone());
+                if text.is_empty() {
+                    w.end_search();
+                } else {
+                    w.start_search();
+                }
                 w.filter.changed(gtk::FilterChange::Different);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.scope_here.connect_toggled(move |b| {
+            if let Some(w) = weak.upgrade() {
+                w.scope_home.set(!b.is_active());
+                if !w.query.borrow().is_empty() {
+                    w.start_search();
+                }
             }
         });
         let toggle = self.search_toggle.clone();
@@ -671,6 +758,9 @@ impl Window {
             w.show_hidden.set(on);
             w.update(|s| s.show_hidden = on);
             w.filter.changed(gtk::FilterChange::Different);
+            if !w.query.borrow().is_empty() {
+                w.start_search();
+            }
         });
         self.window.add_action(&hidden);
 
@@ -810,8 +900,17 @@ impl Window {
         };
     }
 
+    fn in_localsend(&self) -> bool {
+        crate::localsend::is_uri(self.history.borrow().current())
+    }
+
     fn show_view(&self) {
         let mode = self.state.get().mode;
+        if self.in_localsend() {
+            self.stack.set_visible_child_name("localsend");
+            self.update_actions();
+            return;
+        }
         self.stack.set_visible_child_name(mode.id());
         if mode == Mode::Gallery {
             self.gallery.ensure_selection();
@@ -846,12 +945,122 @@ impl Window {
         self.load(&file);
     }
 
+    /// Search as typed: the results take the folder's place in the views.
+    fn start_search(&self) {
+        let query = self.query.borrow().clone();
+        let root = if self.scope_home.get() || self.here().is_none() {
+            gio::File::for_path(glib::home_dir())
+        } else {
+            self.here().expect("a folder")
+        };
+        if let Some(job) = self.search_job.take() {
+            job.abort();
+        }
+        log(&format!("search {query:?} in {}", root.uri()));
+        self.results.remove_all();
+        if self.filtered.model().as_ref() != Some(self.results.upcast_ref()) {
+            self.filtered.set_model(Some(&self.results));
+        }
+        self.location_column.set_visible(true);
+        self.scope_bar.set_reveal_child(true);
+        let here = self.here().map(|f| display_name(&f)).unwrap_or_default();
+        self.scope_here
+            .set_label(&format!("\u{201c}{here}\u{201d}"));
+        self.scope_here.set_visible(self.here().is_some());
+        self.search_status.set_label(&tr("Searching\u{2026}"));
+        self.search_spinner.set_spinning(true);
+        self.search_spinner.set_visible(true);
+        self.window.set_title(Some(&format!(
+            "{} \u{201c}{query}\u{201d}",
+            tr("Searching")
+        )));
+        self.show_view();
+        self.search.grab_focus();
+        let progress = Rc::new(search::Progress {
+            found: Cell::new(0),
+            folders: Cell::new(0),
+        });
+        self.search_progress.replace(Some(progress.clone()));
+        let whole_home = self.scope_home.get();
+        let fut = search::run(
+            root,
+            query.clone(),
+            self.show_hidden.get(),
+            whole_home,
+            self.results.clone(),
+            progress.clone(),
+        );
+        let weak = self.me.borrow().clone();
+        let job = glib::MainContext::default().spawn_local(async move {
+            fut.await;
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let n = progress.found.get();
+            log(&format!(
+                "search done: {n} found in {} folders",
+                progress.folders.get()
+            ));
+            w.search_spinner.set_spinning(false);
+            w.search_spinner.set_visible(false);
+            w.search_status.set_label(&match n {
+                0 => tr("No results"),
+                1 => tr("1 result"),
+                n if n >= search::LIMIT => format!("{} {}", search::LIMIT, tr("results or more")),
+                n => format!("{n} {}", tr("results")),
+            });
+            if n == 0 {
+                w.message
+                    .set_label(&format!("{} \u{201c}{query}\u{201d}", tr("No results for")));
+                w.stack.set_visible_child_name("message");
+            }
+        });
+        self.search_job.replace(Some(job));
+    }
+
+    /// Back to the folder.
+    fn end_search(&self) {
+        if let Some(job) = self.search_job.take() {
+            job.abort();
+        }
+        self.search_progress.replace(None);
+        if self.filtered.model().as_ref() == Some(self.results.upcast_ref()) {
+            self.filtered.set_model(Some(&self.dir));
+            self.results.remove_all();
+            self.location_column.set_visible(false);
+            self.scope_bar.set_reveal_child(false);
+            let title = self.title.title();
+            self.window.set_title(Some(&title));
+            self.show_view();
+        }
+    }
+
     fn load(&self, file: &gio::File) {
         log(&format!("showing {}", file.uri()));
+        self.query.replace(String::new());
+        self.end_search();
         if self.search_toggle.is_active() {
             self.search_toggle.set_active(false);
         }
         let uri = file.uri().to_string();
+        if crate::localsend::is_uri(&uri) {
+            self.dir.set_file(None::<&gio::File>);
+            self.trash_bar.set_reveal_child(false);
+            self.quicklook.hide();
+            let title = tr("LocalSend");
+            let icon: gio::Icon = gio::ThemedIcon::new("network-wireless-symbolic").upcast();
+            self.title.set(&title, file, Some(icon));
+            self.window.set_title(Some(&title));
+            self.sidebar.select_uri(&uri);
+            let h = self.history.borrow();
+            self.set_enabled("back", h.can_go_back());
+            self.set_enabled("forward", h.can_go_forward());
+            self.set_enabled("up", false);
+            drop(h);
+            crate::localsend::refresh();
+            self.show_view();
+            return;
+        }
         let in_trash = trash::is_trash_uri(&uri);
         if in_trash && !trash::gvfs() {
             // No GVfs: list the home trash itself.

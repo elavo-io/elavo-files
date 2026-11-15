@@ -1,0 +1,16 @@
+# systemd user unit for the Files LocalSend receiver.
+# Install: cp to ~/.config/systemd/user/ and run
+#   systemctl --user enable --now elavo-files-localsend.service
+# Use either this unit or the autostart .desktop file, not both.
+[Unit]
+Description=Elavo Files LocalSend receiver
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=elavo-files --localsend-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -162,6 +162,10 @@ impl TitleBox {
         self.proxy.add_controller(hold);
     }
 
+    pub fn title(&self) -> String {
+        self.label.label().to_string()
+    }
+
     /// Show `title` for `location`; the proxy icon is the folder's icon.
     pub fn set(&self, title: &str, location: &gio::File, icon: Option<gio::Icon>) {
         self.label.set_label(title);

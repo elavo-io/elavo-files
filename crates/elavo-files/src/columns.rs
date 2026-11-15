@@ -335,17 +335,33 @@ impl Columns {
         });
 
         // Any press makes the column the one in use, before the row's own
-        // gestures act on it; on empty space it clears the selection.
+        // gestures act on it; on empty space it clears the selection. A
+        // finger is left to scroll the column: it clears on a tap, as it
+        // lifts, and never claims the touch.
         let press = gtk::GestureClick::builder()
             .button(0)
             .propagation_phase(gtk::PropagationPhase::Capture)
             .build();
         let w = with.clone();
+        press.connect_released(move |g, _, x, y| {
+            if !views::is_touch(g) {
+                return;
+            }
+            w(&|this, col, i| {
+                if on_row(col.list.upcast_ref::<gtk::Widget>(), x, y) {
+                    return;
+                }
+                col.sel.unselect_all();
+                this.selection_changed(i);
+            });
+        });
+        let w = with.clone();
         press.connect_pressed(move |g, _, x, y| {
+            let touch = views::is_touch(g);
             w(&|this, col, i| {
                 this.active.set(i);
                 let list = col.list.upcast_ref::<gtk::Widget>();
-                if on_row(list, x, y) {
+                if touch || on_row(list, x, y) {
                     return;
                 }
                 g.set_state(gtk::EventSequenceState::Claimed);

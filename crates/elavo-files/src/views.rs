@@ -3,8 +3,12 @@
 //! the same controllers: right-click (or a long press on the touchscreen)
 //! for the context menu, a drag source for the item and, on folders, a
 //! drop target. What they do is up to the window, through [`CellHandler`].
+//!
+//! A finger on the touchscreen scrolls, as in Nautilus: a drag starts
+//! from an item only after a long press, and a long press let go without
+//! moving opens the item's menu. The mouse and touchpad drag at once.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -20,6 +24,33 @@ pub enum View {
     List,
     Columns,
     Gallery,
+}
+
+/// A finger on the touchscreen, not the mouse or the touchpad, behind the
+/// event `controller` is handling.
+pub fn is_touch(controller: &impl IsA<gtk::EventController>) -> bool {
+    let c = controller.as_ref();
+    c.current_event_device()
+        .is_some_and(|d| d.source() == gdk::InputSource::Touchscreen)
+        || c.current_event()
+            .is_some_and(|e| is_touch_event(e.event_type()))
+}
+
+pub fn is_touch_event(t: gdk::EventType) -> bool {
+    matches!(
+        t,
+        gdk::EventType::TouchBegin
+            | gdk::EventType::TouchUpdate
+            | gdk::EventType::TouchEnd
+            | gdk::EventType::TouchCancel
+    )
+}
+
+/// Whether moving the pointer from an item drags it: at once for the
+/// mouse and touchpad, only after a long press for a finger, which
+/// otherwise scrolls.
+pub fn drags_item(touch: bool, held: bool) -> bool {
+    !touch || held
 }
 
 /// What the window does for the cells.
@@ -197,18 +228,44 @@ pub fn wire(
         m(x, y);
     });
     cell.add_controller(click);
+    // A finger held still on the item: let go and it's the menu, move and
+    // it's a drag. The press doesn't claim the touch, so the drag source
+    // can still take it; GTK's scrolled window stops panning on a long
+    // press by itself.
+    let held = Rc::new(Cell::new(false));
+    let dragging = Rc::new(Cell::new(false));
     let press = gtk::GestureLongPress::builder().touch_only(true).build();
-    press.connect_pressed(move |g, x, y| {
-        g.set_state(gtk::EventSequenceState::Claimed);
-        menu(x, y);
+    let (h, w) = (held.clone(), cell.downgrade());
+    press.connect_pressed(move |_, x, y| {
+        if view == View::Icons && !w.upgrade().is_some_and(|w| on_grab(&w, x, y)) {
+            return;
+        }
+        h.set(true);
     });
     cell.add_controller(press);
+    let tap = gtk::GestureClick::builder().touch_only(true).build();
+    let (h, d) = (held.clone(), dragging.clone());
+    tap.connect_pressed(move |_, _, _, _| {
+        h.set(false);
+        d.set(false);
+    });
+    let (h, d) = (held.clone(), dragging.clone());
+    tap.connect_released(move |_, _, x, y| {
+        if h.replace(false) && !d.get() {
+            menu(x, y);
+        }
+    });
+    cell.add_controller(tap);
 
     let drag = gtk::DragSource::builder()
         .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
         .build();
     let (c, it, w) = (cells.clone(), weak_item.clone(), cell.downgrade());
-    drag.connect_prepare(move |_, x, y| {
+    let h = held.clone();
+    drag.connect_prepare(move |source, x, y| {
+        if !drags_item(is_touch(source), h.get()) {
+            return None;
+        }
         if matches!(view, View::Icons | View::List)
             && !w.upgrade().is_some_and(|w| on_grab(&w, x, y))
         {
@@ -222,6 +279,11 @@ pub fn wire(
         Some(gdk::ContentProvider::for_value(
             &gdk::FileList::from_array(&files).to_value(),
         ))
+    });
+    let (h, d) = (held.clone(), dragging.clone());
+    drag.connect_drag_begin(move |_, _| {
+        h.set(false);
+        d.set(true);
     });
     if let Some(image) = image {
         let image = image.downgrade();
@@ -599,4 +661,38 @@ pub fn sorter(key: Key) -> gtk::CustomSorter {
         }
         ordering(sort::compare(key, &fa, &fb))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingers_scroll_until_held() {
+        // The mouse and touchpad drag items at once.
+        assert!(drags_item(false, false));
+        // A finger scrolls, unless it was held on the item first.
+        assert!(!drags_item(true, false));
+        assert!(drags_item(true, true));
+    }
+
+    #[test]
+    fn touch_events_are_told_apart() {
+        for t in [
+            gdk::EventType::TouchBegin,
+            gdk::EventType::TouchUpdate,
+            gdk::EventType::TouchEnd,
+            gdk::EventType::TouchCancel,
+        ] {
+            assert!(is_touch_event(t));
+        }
+        for t in [
+            gdk::EventType::ButtonPress,
+            gdk::EventType::MotionNotify,
+            gdk::EventType::TouchpadSwipe,
+            gdk::EventType::Scroll,
+        ] {
+            assert!(!is_touch_event(t));
+        }
+    }
 }

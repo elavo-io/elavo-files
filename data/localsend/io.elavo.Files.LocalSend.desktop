@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Files LocalSend Receiver
+Comment=Receive files from LocalSend devices nearby without a Files window open
+Exec=elavo-files --localsend-daemon
+Icon=network-wireless-symbolic
+NoDisplay=true
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Phase=Application

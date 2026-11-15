@@ -166,6 +166,10 @@ pub fn items(s: &Selection) -> gio::Menu {
             .concat(),
         ),
     );
+    menu.append_section(
+        None,
+        &section(&[item(&tr("Send with LocalSend\u{2026}"), "win.share", None)]),
+    );
     if s.folder {
         menu.append_section(
             None,

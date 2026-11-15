@@ -161,6 +161,9 @@ impl Window {
     /// The folder new and pasted files go to: the one shown, or in Columns
     /// the folder of the column in use.
     pub(super) fn here(&self) -> Option<gio::File> {
+        if self.in_localsend() {
+            return None;
+        }
         if self.state.get().mode == Mode::Columns {
             return Some(self.columns.folder());
         }
@@ -187,11 +190,17 @@ impl Window {
     }
 
     fn writable_here(&self) -> bool {
+        if self.in_localsend() || !self.query.borrow().is_empty() {
+            return false;
+        }
         !read_only_place(self.history.borrow().current())
     }
 
     /// The selected rows of the view in use, with their positions.
     pub(super) fn selected(&self) -> Vec<(u32, gio::FileInfo)> {
+        if self.in_localsend() {
+            return Vec::new();
+        }
         let sel = self.sel_of(self.view_kind());
         let set = sel.selection();
         (0..set.size())
@@ -299,7 +308,15 @@ impl Window {
             ("quick-look-close", self.quicklook.is_open()),
             ("extract", archives && !trash_view && writable),
             ("open-terminal", terminal_dir && !trash_view),
-            ("share", false),
+            (
+                "share",
+                any && !trash_view && crate::localsend::is_running() && {
+                    selected
+                        .iter()
+                        .filter_map(|(_, i)| self.file_of(i))
+                        .all(|f| f.path().is_some())
+                },
+            ),
         ] {
             self.set_enabled(name, on);
         }
@@ -419,15 +436,32 @@ impl Window {
         self.stack.add_controller(look);
 
         // Right-click or a long press on empty space; a click there clears
-        // the selection.
+        // the selection. A finger clears it on a tap, when it lifts without
+        // having scrolled, not as it lands.
         for view in [View::Icons, View::List] {
             let widget = self.view_widget(view);
             let click = gtk::GestureClick::builder().button(0).build();
+            let weak = Rc::downgrade(self);
+            click.connect_released(move |g, _, x, y| {
+                let Some(w) = weak.upgrade() else {
+                    return;
+                };
+                if !crate::views::is_touch(g) {
+                    return;
+                }
+                let widget = w.view_widget(view);
+                if !is_in_cell(widget.pick(x, y, gtk::PickFlags::DEFAULT), &widget) {
+                    w.sel_of(view).unselect_all();
+                }
+            });
             let weak = Rc::downgrade(self);
             click.connect_pressed(move |g, _, x, y| {
                 let Some(w) = weak.upgrade() else {
                     return;
                 };
+                if crate::views::is_touch(g) {
+                    return;
+                }
                 let widget = w.view_widget(view);
                 widget.grab_focus();
                 if is_in_cell(widget.pick(x, y, gtk::PickFlags::DEFAULT), &widget) {
@@ -595,8 +629,15 @@ impl Window {
         );
         add("extract", Box::new(|w| w.extract()));
         add("open-terminal", Box::new(|w| w.open_terminal()));
-        // Share (LocalSend) comes in a later phase.
-        add("share", Box::new(|_| {}));
+        add(
+            "share",
+            Box::new(|w| {
+                let files = w.selected_files();
+                if !files.is_empty() {
+                    crate::localsend::pick_and_send(Some(w.window.upcast_ref()), files);
+                }
+            }),
+        );
         let weak = Rc::downgrade(self);
         self.quicklook.connect_close(move || {
             if let Some(w) = weak.upgrade() {

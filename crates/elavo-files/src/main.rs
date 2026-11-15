@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! elavo-files [FOLDER|URI]...   open a window for each, or the home folder
+//! elavo-files --localsend-daemon receive with LocalSend, with no window
 //! ```
 
 mod app;
@@ -13,10 +14,12 @@ mod gallery;
 mod i18n;
 mod info;
 mod jobs;
+mod localsend;
 mod menus;
 mod preview;
 mod quicklook;
 mod rubberband;
+mod search;
 mod settings;
 mod sidebar;
 mod state;

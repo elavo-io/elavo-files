@@ -5,6 +5,10 @@
 //! it while dragging. Near the top or bottom edge the view scrolls. Holding
 //! Ctrl or Shift adds to what was already selected.
 //!
+//! Only the mouse and touchpad draw it: a finger dragging on the
+//! touchscreen scrolls the view, so the rectangle leaves the touch to the
+//! scrolled window's kinetic panning.
+//!
 //! GTK's own rubber band is off: it only reacts to whole rows and columns
 //! and updates in steps. Items are hit-tested against the cells on screen;
 //! their places are kept in content coordinates, so the ones scrolled away
@@ -88,7 +92,7 @@ pub fn attach(
         .build();
     let b = band.clone();
     drag.connect_drag_begin(move |g, x, y| {
-        if !b.on_empty_space(x, y) {
+        if views::is_touch(g) || !b.on_empty_space(x, y) {
             g.set_state(gtk::EventSequenceState::Denied);
             return;
         }
