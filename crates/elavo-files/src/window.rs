@@ -22,6 +22,7 @@ use crate::gallery::Gallery;
 use crate::i18n::tr;
 use crate::jobs::Jobs;
 use crate::preview::Preview;
+use crate::quicklook::QuickLook;
 use crate::rubberband;
 use crate::sidebar::{self, Sidebar};
 use crate::state::{self, Mode, State};
@@ -51,6 +52,8 @@ pub struct Window {
     /// Show Preview: the pane beside Icons and List.
     pane: gtk::Revealer,
     pane_preview: Rc<Preview>,
+    /// Quick Look, over the folder.
+    quicklook: Rc<QuickLook>,
     stack: gtk::Stack,
     message: gtk::Label,
     title: Rc<TitleBox>,
@@ -102,6 +105,10 @@ fn more_menu() -> gio::Menu {
     let preview = gio::Menu::new();
     preview.append(Some(&tr("Show Preview")), Some("win.show-preview"));
     menu.append_section(None, &preview);
+    let settings = gio::Menu::new();
+    settings.append(Some(&tr("Open in Terminal")), Some("win.open-terminal"));
+    settings.append(Some(&tr("Files Settings\u{2026}")), Some("app.settings"));
+    menu.append_section(None, &settings);
     menu
 }
 
@@ -456,7 +463,13 @@ impl Window {
         let views_row = gtk::Box::builder().vexpand(true).build();
         views_row.append(&stack);
         views_row.append(&pane);
-        content.append(&views_row);
+        let quicklook = QuickLook::new();
+        let overlay = gtk::Overlay::builder()
+            .child(&views_row)
+            .vexpand(true)
+            .build();
+        overlay.add_overlay(&quicklook.root);
+        content.append(&overlay);
 
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&sidebar.widget);
@@ -480,6 +493,7 @@ impl Window {
             gallery,
             pane,
             pane_preview,
+            quicklook,
             stack,
             message,
             title,
@@ -678,6 +692,25 @@ impl Window {
         self.window.add_action(&preview);
     }
 
+    /// Files Settings' Show hidden files, applied to this window.
+    pub fn set_show_hidden(&self, on: bool) {
+        if self.show_hidden.get() != on {
+            gtk::prelude::WidgetExt::activate_action(&self.window, "win.show-hidden", None).ok();
+        }
+    }
+
+    /// Sorting and names follow Files Settings at once.
+    pub fn settings_changed(
+        &self,
+        old: &elavo_files_core::prefs::Prefs,
+        new: &elavo_files_core::prefs::Prefs,
+    ) {
+        if old.folders_first != new.folders_first || old.show_extensions != new.show_extensions {
+            self.reload();
+        }
+        self.update_actions();
+    }
+
     /// The preview pane is for Icons and List; Columns and Gallery have
     /// their own.
     fn show_pane(&self) {
@@ -829,6 +862,7 @@ impl Window {
             self.dir.set_file(Some(file));
         }
         self.trash_bar.set_reveal_child(in_trash);
+        self.quicklook.hide();
         let title = sidebar::place_title(&uri)
             .or_else(|| self.sidebar.mount_title(&uri))
             .unwrap_or_else(|| display_name(file));

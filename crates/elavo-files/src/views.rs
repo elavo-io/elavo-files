@@ -427,7 +427,7 @@ pub fn icons_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory
             .and_downcast::<gtk::Label>()
             .expect("label");
         set_icon(&image, &info, size);
-        let text = entry::name(&info);
+        let text = entry::label(&info);
         name.set_label(&text);
         cell.set_tooltip_text(Some(&text));
         c.bind(&info, &cell);
@@ -525,7 +525,7 @@ pub fn name_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory 
             .and_downcast::<gtk::Label>()
             .expect("label");
         set_icon(&image, &info, size);
-        label.set_label(&entry::name(&info));
+        label.set_label(&entry::label(&info));
         c.bind(&info, expander.upcast_ref());
     });
     let c = cells.clone();
@@ -590,6 +590,13 @@ pub fn sorter(key: Key) -> gtk::CustomSorter {
         let mut sb = Default::default();
         let fa = entry::fields(&a, &mut sa);
         let fb = entry::fields(&b, &mut sb);
+        if key == Key::Name && elavo_files_core::prefs::folders_first() && fa.is_dir != fb.is_dir {
+            return if fa.is_dir {
+                gtk::Ordering::Smaller
+            } else {
+                gtk::Ordering::Larger
+            };
+        }
         ordering(sort::compare(key, &fa, &fb))
     })
 }

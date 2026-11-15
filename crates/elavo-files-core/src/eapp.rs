@@ -120,9 +120,57 @@ pub fn is_install(path: &Path) -> bool {
     is_bundle(path) && in_applications(path)
 }
 
+/// What `entry.json` says about a bundle, for Get Info.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Details {
+    pub id: String,
+    /// `flatpak`, `appimage` or `system`.
+    pub kind: String,
+    pub origin: String,
+    /// The file it was installed from, such as an AppImage.
+    pub source: String,
+}
+
+pub fn details(path: &Path) -> Option<Details> {
+    let text = std::fs::read_to_string(path.join("entry.json")).ok()?;
+    let get = |k: &str| json_field(&text, k).unwrap_or_default();
+    Some(Details {
+        id: get("id"),
+        kind: get("kind"),
+        origin: get("origin"),
+        source: get("source"),
+    })
+}
+
+/// How Get Info names the kind of install.
+pub fn kind_label(kind: &str) -> &str {
+    match kind {
+        "flatpak" => "Flatpak",
+        "appimage" => "AppImage",
+        "system" => "Part of Elavo",
+        "" => "Application",
+        other => other,
+    }
+}
+
+/// A version in a file name: `1.98.60` in
+/// `Brave_Origin-1.98.60-1-anylinux-x86_64.AppImage`.
+pub fn version_in(name: &str) -> Option<String> {
+    name.split(['-', '_', ' '])
+        .map(|part| {
+            let part = part.trim_start_matches(['v', 'V']);
+            let end = part
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(part.len());
+            part[..end].trim_end_matches('.')
+        })
+        .find(|v| v.contains('.') && v.split('.').all(|p| !p.is_empty()))
+        .map(str::to_owned)
+}
+
 /// The value of `"key": "..."` in a flat JSON object, enough for
 /// `entry.json`.
-fn json_string(text: &str, key: &str) -> Option<String> {
+pub fn json_field(text: &str, key: &str) -> Option<String> {
     let at = text.find(&format!("\"{key}\""))? + key.len() + 2;
     let rest = text[at..].trim_start().strip_prefix(':')?.trim_start();
     let mut chars = rest.strip_prefix('"')?.chars();
@@ -171,7 +219,7 @@ pub fn plain_name(path: &Path) -> String {
 pub fn name(path: &Path) -> String {
     std::fs::read_to_string(path.join("entry.json"))
         .ok()
-        .and_then(|t| json_string(&t, "name"))
+        .and_then(|t| json_field(&t, "name"))
         .filter(|n| !n.trim().is_empty())
         .or_else(|| desktop_value(path, "Name"))
         .unwrap_or_else(|| plain_name(path))
@@ -329,9 +377,9 @@ mod tests {
     #[test]
     fn json_strings() {
         let t = r#"{ "kind": "flatpak", "name" : "Caf\u00e9 \"Q\"", "x": 1 }"#;
-        assert_eq!(json_string(t, "name").as_deref(), Some("Caf\u{e9} \"Q\""));
-        assert_eq!(json_string(t, "kind").as_deref(), Some("flatpak"));
-        assert_eq!(json_string(t, "missing"), None);
+        assert_eq!(json_field(t, "name").as_deref(), Some("Caf\u{e9} \"Q\""));
+        assert_eq!(json_field(t, "kind").as_deref(), Some("flatpak"));
+        assert_eq!(json_field(t, "missing"), None);
     }
 
     #[test]
@@ -383,5 +431,27 @@ mod tests {
             Icon::Name("org.x.Y".into())
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reads_details_and_versions() {
+        let d = scratch("details");
+        let b = bundle(
+            &d,
+            "Brave Origin.eapp",
+            r#"{"kind": "appimage", "id": "brave-origin", "name": "Brave Origin", "origin": "", "source": "Brave_Origin-1.98.60-1-anylinux-x86_64.AppImage"}"#,
+            "",
+        );
+        let info = details(&b).unwrap();
+        assert_eq!(info.id, "brave-origin");
+        assert_eq!(kind_label(&info.kind), "AppImage");
+        assert_eq!(version_in(&info.source).as_deref(), Some("1.98.60"));
+        assert_eq!(
+            version_in("Cursor-3.24.12-x86_64.AppImage").as_deref(),
+            Some("3.24.12")
+        );
+        assert_eq!(version_in("tool-v2.1.AppImage").as_deref(), Some("2.1"));
+        assert_eq!(version_in("x86_64.AppImage"), None);
+        assert_eq!(version_in("plain"), None);
     }
 }

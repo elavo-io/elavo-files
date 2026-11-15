@@ -1,16 +1,16 @@
-//! File operations: copy, move, trash, delete, Put Back, Compress and
-//! Empty Trash. A job runs on a worker thread with GIO's blocking calls
+//! File operations: copy, move, trash, delete, Put Back, Compress,
+//! Extract Here and Empty Trash. A job runs on a worker thread with GIO's blocking calls
 //! (`gio::File` is thread safe) and talks to the window through [`Ui`]:
 //! progress as it goes, and a question when a name is taken. Cancelling
 //! the `gio::Cancellable` stops it between, or in the middle of, files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gio::glib;
 use gio::prelude::*;
 
-use crate::{naming, trash};
+use crate::{archive, naming, trash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -20,6 +20,7 @@ pub enum Kind {
     Delete,
     Restore,
     Compress,
+    Extract,
     EmptyTrash,
 }
 
@@ -231,6 +232,7 @@ pub fn run(job: &Job, cancel: &gio::Cancellable, ui: &mut dyn Ui) -> Outcome {
             })
         }
         Kind::Compress => r.compress(&job.sources),
+        Kind::Extract => r.extract(&job.sources),
     }
     r.out.cancelled = cancel.is_cancelled();
     r.out
@@ -562,6 +564,161 @@ impl Runner<'_> {
             ));
         }
     }
+
+    /// Extract Here: each archive beside itself, through a hidden folder so
+    /// a half-done extraction never shows under a real name.
+    fn extract(&mut self, sources: &[gio::File]) {
+        self.p.total_items = sources.len();
+        let has = |p: &str| glib::find_program_in_path(p).is_some();
+        for (n, src) in sources.iter().enumerate() {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+            let name = display_name(src);
+            self.p.current = name.clone();
+            self.p.done_items = n;
+            self.report(true);
+            let (Some(path), Some(parent)) = (
+                src.path(),
+                src.path().and_then(|p| p.parent().map(|p| p.to_owned())),
+            ) else {
+                self.out.errors.push(format!(
+                    "\u{201c}{name}\u{201d}: only archives on this computer can be extracted"
+                ));
+                continue;
+            };
+            let Some((format, stem)) = archive::detect(&name) else {
+                self.out.errors.push(format!(
+                    "\u{201c}{name}\u{201d}: not an archive Files can extract"
+                ));
+                continue;
+            };
+            let stem = stem.to_owned();
+            let work = parent.join(format!(".{stem}.extracting-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&work);
+            if let Err(e) = std::fs::create_dir(&work) {
+                self.out.errors.push(format!("\u{201c}{name}\u{201d}: {e}"));
+                continue;
+            }
+            let into = match format {
+                archive::Format::Single(_) => work.join(&stem),
+                _ => work.clone(),
+            };
+            let Some((program, args)) = archive::command(format, &path, &work, &has) else {
+                let _ = std::fs::remove_dir_all(&work);
+                self.out.errors.push(format!(
+                    "\u{201c}{name}\u{201d}: no program that opens this kind of archive is installed"
+                ));
+                continue;
+            };
+            let mut command = std::process::Command::new(&program);
+            command
+                .args(&args)
+                .current_dir(&parent)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
+            if let archive::Format::Single(_) = format {
+                match std::fs::File::create(&into) {
+                    Ok(f) => {
+                        command.stdout(f);
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&work);
+                        self.out.errors.push(format!("\u{201c}{name}\u{201d}: {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                command.stdout(std::process::Stdio::null());
+            }
+            match self.wait(command) {
+                Some(Ok(())) => {}
+                Some(Err(why)) => {
+                    let _ = std::fs::remove_dir_all(&work);
+                    self.out
+                        .errors
+                        .push(format!("\u{201c}{name}\u{201d}: {why}"));
+                    continue;
+                }
+                None => {
+                    let _ = std::fs::remove_dir_all(&work);
+                    break;
+                }
+            }
+            match settle(&work, &parent, &stem) {
+                Ok(done) => self.out.done.push((src.clone(), gio::File::for_path(done))),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&work);
+                    self.out.errors.push(format!("\u{201c}{name}\u{201d}: {e}"));
+                }
+            }
+        }
+        self.p.done_items = sources.len();
+        self.report(true);
+    }
+
+    /// Run a program to the end, or stop it when the job is cancelled
+    /// (None). An error carries the last line it wrote.
+    fn wait(&mut self, mut command: std::process::Command) -> Option<Result<(), String>> {
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            Err(e) => return Some(Err(e.to_string())),
+        };
+        // Read standard error as it comes, so a chatty program never
+        // blocks on a full pipe.
+        let reader = child.stderr.take().map(|mut err| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut text = String::new();
+                let _ = err.read_to_string(&mut text);
+                text
+            })
+        });
+        let status = loop {
+            if self.cancel.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(60)),
+                Err(e) => return Some(Err(e.to_string())),
+            }
+        };
+        let text = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+        Some(if status.success() {
+            Ok(())
+        } else {
+            Err(text
+                .trim()
+                .lines()
+                .last()
+                .unwrap_or("extracting failed")
+                .to_owned())
+        })
+    }
+}
+
+/// Move what was extracted into `work` beside the archive: its one item
+/// under its own name, or everything in a folder named `stem`. Taken
+/// names get a number. Returns where it went.
+fn settle(work: &Path, parent: &Path, stem: &str) -> std::io::Result<PathBuf> {
+    let items: Vec<_> = std::fs::read_dir(work)?.filter_map(Result::ok).collect();
+    let taken = |n: &str| parent.join(n).symlink_metadata().is_ok();
+    if let [one] = items.as_slice() {
+        let name = one.file_name().to_string_lossy().into_owned();
+        let is_dir = one.file_type().is_ok_and(|t| t.is_dir());
+        let (base, ext) = naming::split(&name, is_dir);
+        let target = parent.join(naming::unique(base, ext, 2, taken));
+        std::fs::rename(one.path(), &target)?;
+        std::fs::remove_dir(work)?;
+        return Ok(target);
+    }
+    let stem = if stem.is_empty() { "Archive" } else { stem };
+    let target = parent.join(naming::unique(stem, "", 2, taken));
+    std::fs::rename(work, &target)?;
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -791,5 +948,67 @@ mod tests {
             Resolution::Replace
         );
         assert_eq!(p.resolve(|| unreachable!()), Resolution::Replace);
+    }
+
+    #[test]
+    fn extracts_beside_the_archive() {
+        if glib::find_program_in_path("zip").is_none()
+            || glib::find_program_in_path("tar").is_none()
+        {
+            return;
+        }
+        let s = Scratch::new("extract");
+        let a = s.write("Report.pdf", "pdf");
+        let b = s.write("notes.txt", "txt");
+        let mut ui = Script::default();
+        go(
+            Kind::Compress,
+            vec![a.clone(), b.clone()],
+            Dest::Beside,
+            &mut ui,
+        );
+        let zip = s.0.join("Archive.zip");
+        assert!(zip.exists());
+        // Several items: a folder named after the archive.
+        let out = go(
+            Kind::Extract,
+            vec![gio::File::for_path(&zip)],
+            Dest::Beside,
+            &mut ui,
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(s.read("Archive/notes.txt"), "txt");
+        // Again: the name is taken, so it is numbered.
+        go(
+            Kind::Extract,
+            vec![gio::File::for_path(&zip)],
+            Dest::Beside,
+            &mut ui,
+        );
+        assert_eq!(s.read("Archive 2/Report.pdf"), "pdf");
+        // One item: it comes out under its own name, numbered when taken.
+        let status = std::process::Command::new("tar")
+            .args(["-czf", "one.tar.gz", "notes.txt"])
+            .current_dir(&s.0)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let out = go(
+            Kind::Extract,
+            vec![gio::File::for_path(s.0.join("one.tar.gz"))],
+            Dest::Beside,
+            &mut ui,
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(s.read("notes 2.txt"), "txt");
+        // No work folders left behind.
+        assert!(!std::fs::read_dir(&s.0).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".extracting-")));
+        // Not an archive.
+        let out = go(Kind::Extract, vec![a], Dest::Beside, &mut ui);
+        assert_eq!(out.errors.len(), 1);
     }
 }

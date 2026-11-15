@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use elavo_files_core::clipboard::Op;
 use elavo_files_core::ops::{display_name, Dest, Job, Kind, Outcome};
-use elavo_files_core::{eapp, entry, naming, trash};
+use elavo_files_core::{archive, eapp, entry, naming, trash};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 
@@ -18,7 +18,7 @@ use super::{log, Window};
 use crate::i18n::tr;
 use crate::state::Mode;
 use crate::views::{self, CellHandler, View};
-use crate::{bundles, clip, dialogs, menus, sidebar};
+use crate::{bundles, clip, dialogs, info, menus, settings, sidebar, terminal};
 
 /// The last change, for Undo.
 pub enum Undo {
@@ -257,6 +257,12 @@ impl Window {
             .filter_map(|(_, i)| entry::file(i))
             .any(|f| is_install(&f));
         let one_bundle = matches!(selected.as_slice(), [(_, i)] if eapp::is_marked(i));
+        let archives = any
+            && selected.iter().all(|(_, i)| {
+                !entry::is_dir(i) && archive::is_archive(&i.name().to_string_lossy())
+            });
+        let terminal_dir = self.terminal_dir().is_some();
+        self.follow_quicklook(&selected);
         for (name, on) in [
             ("open", any),
             ("open-with", any && !trash_view),
@@ -288,8 +294,11 @@ impl Window {
                     },
             ),
             ("undo", self.undo.borrow().is_some() && !self.jobs.running()),
-            ("get-info", false),
-            ("quick-look", false),
+            ("get-info", any || self.here().is_some()),
+            ("quick-look", any || self.quicklook.is_open()),
+            ("quick-look-close", self.quicklook.is_open()),
+            ("extract", archives && !trash_view && writable),
+            ("open-terminal", terminal_dir && !trash_view),
             ("share", false),
         ] {
             self.set_enabled(name, on);
@@ -394,6 +403,20 @@ impl Window {
             ));
         }
         self.stack.add_controller(keys);
+        // Space is the list views' own select key, so Quick Look's keys
+        // come first. Escape only acts while Quick Look is open.
+        let look = gtk::ShortcutController::new();
+        look.set_propagation_phase(gtk::PropagationPhase::Capture);
+        for (trigger, action) in [
+            ("space", "win.quick-look"),
+            ("Escape", "win.quick-look-close"),
+        ] {
+            look.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string(trigger),
+                Some(gtk::NamedAction::new(action)),
+            ));
+        }
+        self.stack.add_controller(look);
 
         // Right-click or a long press on empty space; a click there clears
         // the selection.
@@ -561,10 +584,35 @@ impl Window {
                 sidebar::add_folders(&w.sidebar_candidates());
             }),
         );
-        // Later phases: Get Info (4), Quick Look (3), Share (LocalSend).
-        add("get-info", Box::new(|_| {}));
-        add("quick-look", Box::new(|_| {}));
+        add("get-info", Box::new(|w| w.get_info()));
+        add("quick-look", Box::new(|w| w.toggle_quicklook()));
+        add(
+            "quick-look-close",
+            Box::new(|w| {
+                w.quicklook.hide();
+                w.update_actions();
+            }),
+        );
+        add("extract", Box::new(|w| w.extract()));
+        add("open-terminal", Box::new(|w| w.open_terminal()));
+        // Share (LocalSend) comes in a later phase.
         add("share", Box::new(|_| {}));
+        let weak = Rc::downgrade(self);
+        self.quicklook.connect_close(move || {
+            if let Some(w) = weak.upgrade() {
+                w.quicklook.hide();
+                w.update_actions();
+                w.focus_view();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.quicklook.connect_open(move || {
+            if let Some(w) = weak.upgrade() {
+                w.quicklook.hide();
+                w.update_actions();
+                w.open_selected();
+            }
+        });
 
         let open_with = gio::SimpleAction::new("open-with", Some(glib::VariantTy::STRING));
         let weak = Rc::downgrade(self);
@@ -632,6 +680,10 @@ impl Window {
             content_type: &ct,
             in_trash: self.in_trash(),
             bundle: selected.len() == 1 && first.is_some_and(eapp::is_marked),
+            archives: selected.iter().all(|(_, i)| {
+                !entry::is_dir(i) && archive::is_archive(&i.name().to_string_lossy())
+            }),
+            folder: matches!(selected.as_slice(), [(_, i)] if entry::is_dir(i) && !eapp::is_package(i)),
             folders: !self.in_trash()
                 && selected
                     .iter()
@@ -918,18 +970,30 @@ impl Window {
                 tr("items")
             ),
         };
-        self.confirm_delete(files, message);
+        if settings::get().confirm_delete {
+            self.confirm_delete(files, message);
+        } else {
+            self.delete_now(files, None);
+        }
     }
 
     /// Ask, then delete for good.
     fn confirm_delete(self: &Rc<Self>, files: Vec<gio::File>, message: String) {
+        self.delete_now(files, Some(message));
+    }
+
+    /// Delete for good, after asking `question` if there is one.
+    fn delete_now(self: &Rc<Self>, files: Vec<gio::File>, question: Option<String>) {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let Some(w) = weak.upgrade() else {
                 return;
             };
             let detail = tr("This can\u{2019}t be undone.");
-            let yes = dialogs::confirm(&w.window, &message, &detail, &tr("Delete")).await;
+            let yes = match &question {
+                Some(message) => dialogs::confirm(&w.window, message, &detail, &tr("Delete")).await,
+                None => true,
+            };
             w.focus_view();
             if !yes {
                 return;
@@ -1010,13 +1074,14 @@ impl Window {
             let Some(w) = weak.upgrade() else {
                 return;
             };
-            let ok = dialogs::confirm(
-                &w.window,
-                &tr("Are you sure you want to permanently erase the items in the Trash?"),
-                &tr("You can\u{2019}t undo this action."),
-                &tr("Empty Trash"),
-            )
-            .await;
+            let ok = !settings::get().warn_empty_trash
+                || dialogs::confirm(
+                    &w.window,
+                    &tr("Are you sure you want to permanently erase the items in the Trash?"),
+                    &tr("You can\u{2019}t undo this action."),
+                    &tr("Empty Trash"),
+                )
+                .await;
             w.focus_view();
             if ok {
                 w.run(
@@ -1033,6 +1098,125 @@ impl Window {
                 );
             }
         });
+    }
+
+    /// Extract Here, through the operations queue.
+    fn extract(self: &Rc<Self>) {
+        let files: Vec<gio::File> = self
+            .selected_files()
+            .into_iter()
+            .filter(|f| {
+                f.basename()
+                    .is_some_and(|n| archive::is_archive(&n.to_string_lossy()))
+            })
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        let title = format!("{} {}", tr("Extracting"), what(&files));
+        self.run(
+            Job::new(Kind::Extract, files, Dest::Beside),
+            title,
+            |w, out| {
+                dialogs::errors(
+                    &w.window,
+                    &tr("Some archives couldn't be extracted."),
+                    &out.errors,
+                );
+                if !out.done.is_empty() {
+                    let results = Self::results(&out);
+                    w.set_undo(Undo::Created(results.clone()));
+                    w.select_when_listed(&results, false);
+                }
+            },
+        );
+    }
+
+    /// The folder Open in Terminal starts in: the one selected folder, or
+    /// the folder shown. Only folders on this computer.
+    fn terminal_dir(&self) -> Option<std::path::PathBuf> {
+        let selected = self.selected();
+        let file = match selected.as_slice() {
+            [] => self.here(),
+            [(_, i)] if entry::is_dir(i) && !eapp::is_package(i) => self.file_of(i),
+            _ => None,
+        }?;
+        file.path().filter(|p| p.is_dir())
+    }
+
+    fn open_terminal(&self) {
+        let Some(dir) = self.terminal_dir() else {
+            return;
+        };
+        log(&format!("terminal in {}", dir.display()));
+        if let Err(why) = terminal::open(&dir) {
+            dialogs::error(&self.window, &tr("Couldn\u{2019}t open a terminal"), &why);
+        }
+    }
+
+    /// Get Info: a window for each selected item (asking first when there
+    /// are many), or for the folder shown.
+    fn get_info(self: &Rc<Self>) {
+        let mut files = self.selected_files();
+        if files.is_empty() {
+            files.extend(self.here());
+        }
+        if files.len() <= 10 {
+            for f in &files {
+                info::present(&self.window, f);
+            }
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let message = format!(
+                "{} {} {}",
+                tr("Do you want to open"),
+                files.len(),
+                tr("info windows?")
+            );
+            if dialogs::confirm(&w.window, &message, "", &tr("Open")).await {
+                for f in &files {
+                    info::present(&w.window, f);
+                }
+            }
+        });
+    }
+
+    /// Space: Quick Look the selected item, or close it.
+    fn toggle_quicklook(&self) {
+        if self.quicklook.is_open() {
+            self.quicklook.hide();
+        } else {
+            let selected = self.selected();
+            self.show_quicklook(&selected);
+        }
+        self.update_actions();
+    }
+
+    fn show_quicklook(&self, selected: &[(u32, gio::FileInfo)]) {
+        let Some((_, info)) = selected.first() else {
+            return;
+        };
+        if let Some(file) = self.file_of(info) {
+            log(&format!("quick look {}", file.uri()));
+            self.quicklook.show(&file, info);
+        }
+    }
+
+    /// While Quick Look is open it shows the selection as it changes.
+    fn follow_quicklook(&self, selected: &[(u32, gio::FileInfo)]) {
+        if !self.quicklook.is_open() {
+            return;
+        }
+        if selected.is_empty() {
+            self.quicklook.hide();
+        } else {
+            self.show_quicklook(selected);
+        }
     }
 
     fn compress(self: &Rc<Self>) {

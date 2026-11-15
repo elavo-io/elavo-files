@@ -61,7 +61,7 @@ fn film_factory(cells: &Rc<Cells>) -> gtk::SignalListItemFactory {
             .and_downcast::<gtk::Image>()
             .expect("image");
         views::set_icon(&image, &info, FILM_SIZE);
-        cell.set_tooltip_text(Some(&entry::name(&info)));
+        cell.set_tooltip_text(Some(&entry::label(&info)));
         c.bind(&info, &cell);
     });
     let c = cells.clone();

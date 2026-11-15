@@ -19,6 +19,17 @@ pub fn name(info: &gio::FileInfo) -> String {
     info.display_name().to_string()
 }
 
+/// The name a view shows: without its extension when Show All Filename
+/// Extensions is off (folders and applications keep theirs as they are).
+pub fn label(info: &gio::FileInfo) -> String {
+    let name = name(info);
+    if crate::prefs::show_extensions() || is_dir(info) {
+        return name;
+    }
+    let (stem, _) = crate::naming::split(&name, false);
+    stem.to_owned()
+}
+
 /// A folder, or an item in Recents or Trash that stands for one.
 pub fn is_dir(info: &gio::FileInfo) -> bool {
     info.file_type() == gio::FileType::Directory

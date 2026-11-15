@@ -14,7 +14,7 @@ thread_local! {
 }
 
 pub fn open_window(app: &gtk::Application, folder: Option<gio::File>) {
-    let folder = folder.unwrap_or_else(|| gio::File::for_path(glib::home_dir()));
+    let folder = folder.unwrap_or_else(crate::settings::new_window_folder);
     let w = Window::new(app, folder);
     let weak = Rc::downgrade(&w);
     w.window.connect_close_request(move |_| {
@@ -26,6 +26,34 @@ pub fn open_window(app: &gtk::Application, folder: Option<gio::File>) {
     });
     w.window.present();
     WINDOWS.with(|all| all.borrow_mut().push(w));
+}
+
+/// Show Hidden Files in every window (Files Settings), and for windows
+/// opened later.
+pub fn set_show_hidden(on: bool) {
+    let mut any = false;
+    WINDOWS.with(|all| {
+        for w in all.borrow().iter() {
+            w.set_show_hidden(on);
+            any = true;
+        }
+    });
+    if !any {
+        let mut st = crate::state::read();
+        st.show_hidden = on;
+        crate::state::write(&st);
+    }
+}
+
+/// Files Settings changed: every window shows its folder again.
+fn follow_settings() {
+    crate::settings::connect(|old, new| {
+        WINDOWS.with(|all| {
+            for w in all.borrow().iter() {
+                w.settings_changed(old, new);
+            }
+        });
+    });
 }
 
 fn load_css() {
@@ -90,6 +118,9 @@ const ACCELS: &[(&str, &[&str])] = &[
     ("win.zoom-reset", &["<Control>0", "<Control>KP_0"]),
     ("win.search", &["<Control>f"]),
     ("win.reload", &["F5", "<Control>r"]),
+    ("win.get-info", &["<Control>i"]),
+    ("win.open-terminal", &["<Control><Alt>t"]),
+    ("app.settings", &["<Control>comma"]),
 ];
 
 pub fn run() -> glib::ExitCode {
@@ -111,6 +142,15 @@ pub fn run() -> glib::ExitCode {
             }
         });
         app.add_action(&new_window);
+        let settings = gio::SimpleAction::new("settings", None);
+        let a = app.downgrade();
+        settings.connect_activate(move |_, _| {
+            let parent = a.upgrade().and_then(|a| a.active_window());
+            crate::settings::present(parent.as_ref());
+        });
+        app.add_action(&settings);
+        crate::settings::get();
+        follow_settings();
     });
     app.connect_activate(|app| open_window(app, None));
     app.connect_open(|app, files, _| {

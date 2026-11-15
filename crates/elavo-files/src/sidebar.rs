@@ -102,6 +102,49 @@ fn label(id: &str) -> (String, &'static str) {
     }
 }
 
+/// A fixed place's name and icon, for Files Settings.
+pub fn label_of(id: &str) -> (String, &'static str) {
+    label(id)
+}
+
+/// Whether `uri` is among the Favorites.
+pub fn is_favorite(uri: &str) -> bool {
+    current().iter().any(|f| same_uri(&f.uri, uri))
+}
+
+/// Show or hide a place among the Favorites (Files Settings), adding it at
+/// the end as Finder does.
+pub fn set_favorite(uri: &str, on: bool) {
+    let mut list = current();
+    if on {
+        if list.iter().any(|f| same_uri(&f.uri, uri)) {
+            return;
+        }
+        let at = list.len();
+        favorites::insert(&mut list, Favorite::new(uri), at);
+    } else if !favorites::remove(&mut list, uri) {
+        return;
+    }
+    store(list);
+}
+
+/// Every sidebar follows Files Settings' Sidebar tab.
+fn follow_settings() {
+    thread_local! {
+        static FOLLOWING: Cell<bool> = const { Cell::new(false) };
+    }
+    if FOLLOWING.with(|f| f.replace(true)) {
+        return;
+    }
+    crate::settings::connect(|_, _| {
+        SIDEBARS.with(|all| {
+            for s in all.borrow().iter().filter_map(Weak::upgrade) {
+                s.refresh();
+            }
+        });
+    });
+}
+
 /// The places a favorite can be, for their names and icons.
 fn known_places() -> Vec<Place> {
     let mut all = vec![
@@ -365,6 +408,7 @@ impl Sidebar {
         });
         this.me.replace(Rc::downgrade(&this));
         SIDEBARS.with(|all| all.borrow_mut().push(Rc::downgrade(&this)));
+        follow_settings();
         this.rebuild();
         let weak = Rc::downgrade(&this);
         let refresh = move || {
@@ -390,7 +434,7 @@ impl Sidebar {
     }
 
     /// Rebuild, keeping the highlighted row.
-    fn refresh(&self) {
+    pub fn refresh(&self) {
         let selected = self
             .list
             .selected_row()
@@ -479,8 +523,11 @@ impl Sidebar {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
-        self.list
-            .append(&place_row(&places::recents(), &self.cells));
+        let prefs = crate::settings::get();
+        if prefs.show_recents {
+            self.list
+                .append(&place_row(&places::recents(), &self.cells));
+        }
 
         let header = section(&tr("Favorites"));
         self.menu_on(&header, None);
@@ -500,9 +547,11 @@ impl Sidebar {
         let after = section(&tr("Locations"));
         self.list.append(&after);
         self.after.replace(Some(after));
-        self.list.append(&place_row(&places::home(), &self.cells));
+        if prefs.show_home {
+            self.list.append(&place_row(&places::home(), &self.cells));
+        }
         for mount in self.monitor.mounts() {
-            if mount.is_shadowed() {
+            if mount.is_shadowed() || !prefs.show_drives {
                 continue;
             }
             let uri = mount.root().uri().to_string();
@@ -510,9 +559,22 @@ impl Sidebar {
             take_drops(&row, &uri, &self.cells);
             self.list.append(&row);
         }
-        self.list
-            .append(&place_row(&places::network(), &self.cells));
-        self.list.append(&place_row(&places::trash(), &self.cells));
+        if prefs.show_network {
+            self.list
+                .append(&place_row(&places::network(), &self.cells));
+        }
+        if prefs.show_trash {
+            self.list.append(&place_row(&places::trash(), &self.cells));
+        }
+        if prefs.show_localsend {
+            // A placeholder: sharing with LocalSend comes later.
+            self.list.append(&section(&tr("Shared")));
+            let icon: gio::Icon = gio::ThemedIcon::new("network-wireless-symbolic").upcast();
+            let row = item(&tr("LocalSend"), &icon, "");
+            row.set_sensitive(false);
+            row.set_tooltip_text(Some(&tr("Sharing with LocalSend comes in a later version")));
+            self.list.append(&row);
+        }
     }
 
     /// A favorite: inside a revealer, so removing it can close up.

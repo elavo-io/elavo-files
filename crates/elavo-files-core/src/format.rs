@@ -23,6 +23,28 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
+/// `1,234,567`: a whole number with thousands separators, as Get Info
+/// writes exact byte counts.
+pub fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Get Info's size line: `1.2 MB (1,234,567 bytes)`.
+pub fn size_exact(bytes: u64) -> String {
+    if bytes < 1_000 {
+        return size(bytes);
+    }
+    format!("{} ({} bytes)", size(bytes), grouped(bytes))
+}
+
 /// `untitled folder`, or `untitled folder 2` and up when that is taken, as
 /// Finder and Folio's desktop name a new folder.
 pub fn new_folder_name(existing: &[String]) -> String {
@@ -137,5 +159,15 @@ mod tests {
             date(&at(2025, 12, 31, 23, 59), today, yesterday),
             "Dec 31, 2025 at 11:59 PM"
         );
+    }
+
+    #[test]
+    fn groups_thousands() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1000), "1,000");
+        assert_eq!(grouped(1234567), "1,234,567");
+        assert_eq!(size_exact(512), "512 bytes");
+        assert_eq!(size_exact(1_234_567), "1.2 MB (1,234,567 bytes)");
     }
 }

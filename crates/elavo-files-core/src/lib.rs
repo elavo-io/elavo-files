@@ -7,6 +7,7 @@
 //! Kept free of widgets so it can move into `elavo-folio/crates` with the
 //! app and be shared with Folio's desktop later.
 
+pub mod archive;
 pub mod clipboard;
 pub mod eapp;
 pub mod entry;
@@ -16,6 +17,7 @@ pub mod history;
 pub mod naming;
 pub mod ops;
 pub mod places;
+pub mod prefs;
 pub mod sort;
 pub mod trash;
 pub mod zoom;

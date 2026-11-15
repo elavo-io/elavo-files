@@ -576,3 +576,117 @@ tooltip.background label {
   min-width: 4px;
   background: none;
 }
+
+/* The new Get Info and Settings windows share the window's 16px outline;
+ * panels sit 4px inside it, at 12px. Fullscreen is the only square case. */
+window.files-info,
+window.files-info > decoration,
+window.files-settings,
+window.files-settings > decoration {
+  border-radius: 16px;
+}
+
+window.files-info.fullscreen,
+window.files-info.fullscreen > decoration,
+window.files-settings.fullscreen,
+window.files-settings.fullscreen > decoration {
+  border-radius: 0;
+}
+
+.files-info-name {
+  font-weight: bold;
+  font-size: 1.1em;
+}
+
+.files-info-section {
+  padding-top: 10px;
+  border-top: 1px solid alpha(currentColor, 0.10);
+}
+
+.files-info-section > title {
+  font-weight: bold;
+}
+
+.files-settings-bar {
+  min-height: 66px;
+}
+
+.files-settings-tabs {
+  margin: 2px 8px;
+}
+
+button.files-settings-tab {
+  min-width: 64px;
+  min-height: 46px;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  box-shadow: none;
+  font-size: 0.9em;
+}
+
+button.files-settings-tab image {
+  -gtk-icon-size: 24px;
+}
+
+button.files-settings-tab:checked {
+  background-color: alpha(currentColor, 0.12);
+}
+
+.files-settings-group {
+  border-radius: 12px;
+  padding: 12px;
+  background-color: alpha(currentColor, 0.045);
+}
+
+.files-settings-group checkbutton {
+  min-height: 26px;
+}
+
+.files-settings-heading {
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+/* Quick Look floats over the folder. 16 / 4 / 12 concentric corners. */
+.files-quicklook {
+  border-radius: 16px;
+  padding: 4px;
+  background: @theme_bg_color;
+  box-shadow: 0 5px 30px alpha(black, 0.5), 0 0 0 1px alpha(currentColor, 0.15);
+}
+
+.files-quicklook-bar {
+  padding: 5px 8px 8px;
+}
+
+.files-quicklook-title {
+  font-weight: bold;
+}
+
+button.files-quicklook-button {
+  border-radius: 999px;
+  padding: 3px 12px;
+  min-height: 26px;
+  font-size: 0.9em;
+}
+
+.files-quicklook-stage {
+  border-radius: 12px;
+  background: @view_bg_color;
+}
+
+.files-quicklook-text {
+  background: @view_bg_color;
+  font-size: 0.95em;
+}
+
+.files-quicklook-meta {
+  padding: 8px 10px 6px;
+  font-size: 0.9em;
+}
+
+.files-quicklook-page {
+  box-shadow: 0 2px 10px alpha(black, 0.3);
+}

@@ -34,6 +34,10 @@ pub struct Selection<'a> {
     pub bundle: bool,
     /// A folder among them, for Add to Sidebar.
     pub folders: bool,
+    /// Only archives, for Extract Here.
+    pub archives: bool,
+    /// One folder, for Open in Terminal.
+    pub folder: bool,
 }
 
 fn quoted_or_count(s: &Selection) -> String {
@@ -140,17 +144,38 @@ pub fn items(s: &Selection) -> gio::Menu {
     } else {
         format!("{} {} {}", tr("Compress"), s.count, tr("Items"))
     };
+    let mut tools = vec![
+        item(&tr("Get Info"), "win.get-info", Some("<Control>i")),
+        item(&tr("Rename"), "win.rename", Some("F2")),
+        item(&compress, "win.compress", None),
+    ];
+    if s.archives {
+        tools.push(item(&tr("Extract Here"), "win.extract", None));
+    }
     menu.append_section(
         None,
-        &section(&[
-            item(&tr("Get Info"), "win.get-info", Some("<Control>i")),
-            item(&tr("Rename"), "win.rename", Some("F2")),
-            item(&compress, "win.compress", None),
-            item(&tr("Duplicate"), "win.duplicate", Some("<Control>d")),
-            item(&tr("Make Alias"), "win.make-alias", None),
-            item(&tr("Quick Look"), "win.quick-look", Some("space")),
-        ]),
+        &section(
+            &[
+                tools.as_slice(),
+                &[
+                    item(&tr("Duplicate"), "win.duplicate", Some("<Control>d")),
+                    item(&tr("Make Alias"), "win.make-alias", None),
+                    item(&tr("Quick Look"), "win.quick-look", Some("space")),
+                ],
+            ]
+            .concat(),
+        ),
     );
+    if s.folder {
+        menu.append_section(
+            None,
+            &section(&[item(
+                &tr("Open in Terminal"),
+                "win.open-terminal",
+                Some("<Control><Alt>t"),
+            )]),
+        );
+    }
     if s.folders {
         menu.append_section(
             None,
@@ -191,6 +216,17 @@ pub fn background(in_trash: bool) -> gio::Menu {
                 "win.new-folder",
                 Some("<Control><Shift>n"),
             )]),
+        );
+        menu.append_section(
+            None,
+            &section(&[
+                item(&tr("Get Info"), "win.get-info", Some("<Control>i")),
+                item(
+                    &tr("Open in Terminal"),
+                    "win.open-terminal",
+                    Some("<Control><Alt>t"),
+                ),
+            ]),
         );
         menu.append_section(
             None,

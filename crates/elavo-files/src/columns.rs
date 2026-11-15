@@ -118,7 +118,7 @@ fn row_factory(cells: &Rc<Cells>) -> gtk::SignalListItemFactory {
             .expect("name");
         let chevron = name.next_sibling().expect("chevron");
         views::set_icon(&image, &info, 16);
-        name.set_label(&entry::name(&info));
+        name.set_label(&entry::label(&info));
         chevron.set_opacity(if is_folder(&info) { 1.0 } else { 0.0 });
         c.bind(&info, &row);
     });
