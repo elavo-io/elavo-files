@@ -28,7 +28,7 @@ pub async fn conflict(parent: Option<&gtk::ApplicationWindow>, c: &Conflict) -> 
         .resizable(false)
         .title(tr("Name Conflict"))
         .default_width(460)
-        .css_classes(["files-dialog"])
+        .css_classes(["background", "files-dialog"])
         .build();
     window.set_transient_for(parent);
     window.set_titlebar(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));

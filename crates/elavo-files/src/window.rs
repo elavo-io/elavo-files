@@ -86,6 +86,9 @@ pub struct Window {
     undo: RefCell<Option<fileops::Undo>>,
     pending: RefCell<fileops::Pending>,
     menu: RefCell<Option<gtk::PopoverMenu>>,
+    /// The location last mounted on the way to it, so a failed mount
+    /// isn't retried in a loop.
+    mount_tried: RefCell<String>,
     me: RefCell<std::rc::Weak<Window>>,
 }
 
@@ -120,6 +123,13 @@ fn more_menu() -> gio::Menu {
     let preview = gio::Menu::new();
     preview.append(Some(&tr("Show Preview")), Some("win.show-preview"));
     menu.append_section(None, &preview);
+    let network = gio::Menu::new();
+    network.append(
+        Some(&tr("Connect to Server\u{2026}")),
+        Some("win.connect-server"),
+    );
+    network.append(Some(&tr("Eject")), Some("win.eject"));
+    menu.append_section(None, &network);
     let settings = gio::Menu::new();
     settings.append(Some(&tr("Open in Terminal")), Some("win.open-terminal"));
     settings.append(Some(&tr("Files Settings\u{2026}")), Some("app.settings"));
@@ -145,6 +155,10 @@ fn log(msg: &str) {
 }
 
 fn display_name(file: &gio::File) -> String {
+    // Inside a bundle (Show Package Contents): named as in the views.
+    if let Some(name) = file.path().and_then(|p| eapp::shown_path_name(&p)) {
+        return name;
+    }
     file.query_info(
         "standard::display-name",
         gio::FileQueryInfoFlags::NONE,
@@ -582,6 +596,7 @@ impl Window {
             undo: RefCell::default(),
             pending: RefCell::default(),
             menu: RefCell::default(),
+            mount_tried: RefCell::default(),
             me: RefCell::default(),
         });
         this.me.replace(Rc::downgrade(&this));
@@ -637,6 +652,18 @@ impl Window {
             let (Some(w), Some(err)) = (weak.upgrade(), dir.error()) else {
                 return;
             };
+            // A network location or drive not mounted yet: mount it, asking
+            // for a password if it needs one, then show it.
+            if err.matches(gio::IOErrorEnum::NotMounted) {
+                if let Some(file) = dir.file() {
+                    let uri = file.uri().to_string();
+                    if *w.mount_tried.borrow() != uri {
+                        w.mount_tried.replace(uri);
+                        w.mount_and_show(&file);
+                        return;
+                    }
+                }
+            }
             w.message.set_label(&format!(
                 "{}\n{}",
                 tr("This folder can't be opened."),
@@ -795,7 +822,12 @@ impl Window {
         old: &elavo_files_core::prefs::Prefs,
         new: &elavo_files_core::prefs::Prefs,
     ) {
-        if old.folders_first != new.folders_first || old.show_extensions != new.show_extensions {
+        let bundles =
+            |p: &elavo_files_core::prefs::Prefs| p.show_extensions && p.show_bundle_extensions;
+        if old.folders_first != new.folders_first
+            || old.show_extensions != new.show_extensions
+            || bundles(old) != bundles(new)
+        {
             self.reload();
         }
         self.update_actions();
@@ -920,8 +952,76 @@ impl Window {
         self.update_actions();
     }
 
+    /// Mount the place shown, then list it.
+    fn mount_and_show(&self, file: &gio::File) {
+        let host = crate::mounts::shown(file);
+        log(&format!("connecting to {host}"));
+        self.message.set_label(&format!(
+            "{} \u{201c}{host}\u{201d}\u{2026}",
+            tr("Connecting to")
+        ));
+        self.stack.set_visible_child_name("message");
+        let weak = self.me.borrow().clone();
+        let f = file.clone();
+        crate::mounts::mount(Some(self.window.upcast_ref()), file, move |r| {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            if w.history.borrow().current() != f.uri().as_str() {
+                return;
+            }
+            match r {
+                Ok(()) => {
+                    w.dir.set_file(None::<&gio::File>);
+                    w.load(&f);
+                }
+                Err(e) if crate::mounts::quietly_cancelled(&e) => {
+                    w.message.set_label(&format!(
+                        "{} \u{201c}{host}\u{201d}.\n{}",
+                        tr("Not connected to"),
+                        tr("Reload to try again.")
+                    ));
+                }
+                Err(e) => {
+                    w.message.set_label(&format!(
+                        "{} \u{201c}{host}\u{201d}.\n{}",
+                        tr("Couldn\u{2019}t connect to"),
+                        e.message()
+                    ));
+                }
+            }
+        });
+    }
+
+    /// Whether this window shows `folder`.
+    pub fn shows(&self, folder: &gio::File) -> bool {
+        gio::File::for_uri(self.history.borrow().current()).equal(folder)
+    }
+
+    /// Select `files` (in the folder shown) once they are listed.
+    pub fn show_items(self: &Rc<Self>, files: &[gio::File]) {
+        self.select_when_listed(files, false);
+    }
+
+    /// Something was mounted or unmounted: Eject may apply now.
+    pub fn mounts_changed(&self) {
+        self.update_actions();
+    }
+
+    /// A drive or share under `root` is going away: go Home if this
+    /// window shows a place on it.
+    pub fn leave(&self, root: &gio::File) {
+        let here = gio::File::for_uri(self.history.borrow().current());
+        if here.equal(root) || here.has_prefix(root) {
+            log(&format!("leaving {}", crate::mounts::shown(root)));
+            self.dir.set_file(None::<&gio::File>);
+            self.go(gio::File::for_path(glib::home_dir()));
+        }
+    }
+
     /// Open a folder in this window, adding it to Back.
     pub fn go(&self, file: gio::File) {
+        self.mount_tried.replace(String::new());
         let changed = self.history.borrow_mut().visit(file.uri().to_string());
         if changed {
             self.load(&file);
@@ -935,11 +1035,13 @@ impl Window {
             next.cloned()
         };
         if let Some(uri) = uri {
+            self.mount_tried.replace(String::new());
             self.load(&gio::File::for_uri(&uri));
         }
     }
 
     fn reload(&self) {
+        self.mount_tried.replace(String::new());
         let file = gio::File::for_uri(self.history.borrow().current());
         self.dir.set_file(None::<&gio::File>);
         self.load(&file);
@@ -1129,6 +1231,27 @@ impl Window {
                         .show(Some(&self.window));
                 }
             }
+            return;
+        }
+        // A share in a server's listing, say: mount it, then show it.
+        if info.file_type() == gio::FileType::Mountable
+            && info.attribute_string("standard::target-uri").is_none()
+        {
+            let weak = self.me.borrow().clone();
+            crate::mounts::mount_mountable(Some(self.window.upcast_ref()), &target, move |r| {
+                let Some(w) = weak.upgrade() else {
+                    return;
+                };
+                match r {
+                    Ok(root) => w.go(root),
+                    Err(e) if crate::mounts::quietly_cancelled(&e) => {}
+                    Err(e) => crate::dialogs::error(
+                        &w.window,
+                        &tr("Couldn\u{2019}t connect."),
+                        e.message(),
+                    ),
+                }
+            });
             return;
         }
         if entry::is_dir(info) {

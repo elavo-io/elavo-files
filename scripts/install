@@ -1,0 +1,33 @@
+#!/bin/sh
+# Install a release build. Run `cargo build --release` first.
+# Honors DESTDIR and PREFIX (default /usr). The image build calls this.
+#
+# Files is the default file manager once installed: it is the
+# inode/directory handler in its desktop file, D-Bus starts it for
+# io.elavo.Files and org.freedesktop.FileManager1, and the LocalSend
+# receiver starts at login. The image makes it the default over Nautilus
+# (see data/packaging/README.md).
+set -eu
+
+cd "$(dirname "$0")/.."
+prefix="${PREFIX:-/usr}"
+dest="${DESTDIR:-}"
+id=io.elavo.Files
+
+install -Dm755 target/release/elavo-files "${dest}${prefix}/bin/elavo-files"
+install -Dm644 "data/${id}.desktop" "${dest}${prefix}/share/applications/${id}.desktop"
+# D-Bus service files name the binary's path; they do not follow PREFIX.
+for svc in "${id}.service" org.freedesktop.FileManager1.service; do
+    install -Dm644 "data/dbus/${svc}" "${dest}/usr/share/dbus-1/services/${svc}"
+done
+# Receive with LocalSend with no window open, from login. (The systemd
+# user unit in data/localsend is the alternative; install one, not both.)
+install -Dm644 data/localsend/io.elavo.Files.LocalSend.desktop \
+    "${dest}/etc/xdg/autostart/io.elavo.Files.LocalSend.desktop"
+
+for po in po/*.po; do
+    [ -e "${po}" ] || continue
+    lang="$(basename "${po}" .po)"
+    install -d "${dest}${prefix}/share/locale/${lang}/LC_MESSAGES"
+    msgfmt -o "${dest}${prefix}/share/locale/${lang}/LC_MESSAGES/${id}.mo" "${po}"
+done

@@ -301,6 +301,12 @@ impl TitleBox {
 }
 
 fn display_name(file: &gio::File) -> String {
+    if let Some(name) = file
+        .path()
+        .and_then(|p| elavo_files_core::eapp::shown_path_name(&p))
+    {
+        return name;
+    }
     file.query_info(
         "standard::display-name",
         gio::FileQueryInfoFlags::NONE,

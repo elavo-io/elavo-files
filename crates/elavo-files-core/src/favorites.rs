@@ -20,12 +20,32 @@ pub struct Favorite {
 }
 
 impl Favorite {
+    /// Always kept as a URI: a bare path is turned into one.
     pub fn new(uri: &str) -> Self {
         Self {
-            uri: uri.to_owned(),
+            uri: to_uri(uri).unwrap_or_else(|| uri.to_owned()),
             name: None,
         }
     }
+}
+
+/// A line's location as a URI: URIs as they are, and an absolute or `~/`
+/// path (as a hand edit or another tool may write) turned into a `file://`
+/// one. `None` for anything else.
+pub fn to_uri(text: &str) -> Option<String> {
+    if text.contains(":/") {
+        return Some(text.to_owned());
+    }
+    let path = if let Some(rest) = text.strip_prefix("~/") {
+        glib::home_dir().join(rest)
+    } else if text == "~" {
+        glib::home_dir()
+    } else if text.starts_with('/') {
+        PathBuf::from(text)
+    } else {
+        return None;
+    };
+    Some(gio::File::for_path(path).uri().to_string())
 }
 
 pub fn same_uri(a: &str, b: &str) -> bool {
@@ -50,24 +70,29 @@ pub fn gtk_bookmarks_path() -> PathBuf {
 }
 
 /// One `uri [name]` per line; blank lines, `#` comments and repeats are
-/// skipped.
+/// skipped. A bare path is read as its `file://` URI (and saved as one
+/// next time); a path with spaces in it can't be told from a name, so the
+/// whole line is tried as a path first.
 pub fn parse(text: &str) -> Vec<Favorite> {
     let mut out: Vec<Favorite> = Vec::new();
     for line in text.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        let whole_path = !line.contains(":/")
+            && to_uri(line)
+                .is_some_and(|u| gio::File::for_uri(&u).query_exists(gio::Cancellable::NONE));
         let (uri, name) = match line.split_once(' ') {
-            Some((u, n)) => (u, Some(n.trim().to_owned()).filter(|n| !n.is_empty())),
-            None => (line, None),
+            Some((u, n)) if !whole_path => (u, Some(n.trim().to_owned()).filter(|n| !n.is_empty())),
+            _ => (line, None),
         };
-        if !uri.contains(":/") || out.iter().any(|f| same_uri(&f.uri, uri)) {
+        let Some(uri) = to_uri(uri) else {
+            continue;
+        };
+        if out.iter().any(|f| same_uri(&f.uri, &uri)) {
             continue;
         }
-        out.push(Favorite {
-            uri: uri.to_owned(),
-            name,
-        });
+        out.push(Favorite { uri, name });
     }
     out
 }
@@ -86,7 +111,7 @@ pub fn serialize(list: &[Favorite]) -> String {
 }
 
 /// The standard folders: home and the XDG ones.
-fn standard(uri: &str) -> bool {
+pub fn is_standard(uri: &str) -> bool {
     use glib::UserDirectory as D;
     let Some(path) = gio::File::for_uri(uri).path() else {
         return false;
@@ -112,7 +137,7 @@ fn standard(uri: &str) -> bool {
 pub fn imports(gtk_bookmarks: &str) -> Vec<Favorite> {
     parse(gtk_bookmarks)
         .into_iter()
-        .filter(|f| f.uri.starts_with("file:///") && !standard(&f.uri))
+        .filter(|f| f.uri.starts_with("file:///") && !is_standard(&f.uri))
         .collect()
 }
 
@@ -209,6 +234,45 @@ mod tests {
         assert_eq!(list[0].name.as_deref(), Some("Applications"));
         assert_eq!(list[1].name, None);
         assert_eq!(parse(&serialize(&list)), list);
+    }
+
+    #[test]
+    fn bare_paths_become_uris() {
+        let home = gio::File::for_path(glib::home_dir()).uri().to_string();
+        let list = parse(
+            "file:///a\n/tmp/elavo fav test Name\n/srv/x Projects\n~/Pictures\n\
+             file:///srv/x\nrelative/path\n",
+        );
+        assert_eq!(
+            uris(&list),
+            [
+                "file:///a",
+                "file:///tmp/elavo",
+                "file:///srv/x",
+                &format!("{home}/Pictures")[..],
+            ]
+        );
+        assert_eq!(list[1].name.as_deref(), Some("fav test Name"));
+        assert_eq!(list[2].name.as_deref(), Some("Projects"));
+        // Saved back as URIs.
+        assert!(serialize(&list)
+            .lines()
+            .skip(1)
+            .all(|l| l.starts_with("file:///")));
+        assert_eq!(Favorite::new("/tmp/a b").uri, "file:///tmp/a%20b");
+        assert_eq!(Favorite::new("sftp://h/x").uri, "sftp://h/x");
+        assert!(is_standard(&home));
+        assert!(!is_standard("file:///srv/x"));
+    }
+
+    #[test]
+    fn a_bare_path_with_spaces_that_exists() {
+        let dir = std::env::temp_dir().join(format!("elavo fav {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = parse(&format!("{}\n", dir.display()));
+        assert_eq!(uris(&list), [gio::File::for_path(&dir).uri().as_str()]);
+        assert_eq!(list[0].name, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

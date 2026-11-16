@@ -464,7 +464,7 @@ impl Preview {
         if let Some(s) = &self.stage {
             s.show(file, info);
         }
-        self.name.set_label(&entry::name(info));
+        self.name.set_label(&entry::title(info));
         let package = eapp::is_package(info);
         let dir = entry::is_dir(info);
         let kind = entry::kind(info);

@@ -1,0 +1,105 @@
+diff --git a/Containerfile b/Containerfile
+index bce850f..23258d1 100644
+--- a/Containerfile
++++ b/Containerfile
+@@ -64,6 +64,20 @@ RUN git clone --depth 1 --branch "${ELAVO_APPLICATIONS_REF}" \
+ WORKDIR /src
+ RUN cargo build --release --locked && make -C nautilus && DESTDIR=/out scripts/install
+ 
++# Files, the file manager (elavo-files): Finder-style windows, LocalSend,
++# network shares and Eject. Its install script puts in the desktop file, the
++# D-Bus services for io.elavo.Files and org.freedesktop.FileManager1, and the
++# LocalSend receiver's autostart entry. main until the first tag; pin it
++# like Folio after that.
++FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION} AS files
++ARG ELAVO_FILES_REF=main
++RUN dnf5 install -y git gcc pkgconf-pkg-config rust cargo gtk4-devel && \
++    dnf5 clean all
++RUN git clone --depth 1 --branch "${ELAVO_FILES_REF}" \
++        https://github.com/elavo-io/elavo-files.git /src
++WORKDIR /src
++RUN cargo build --release --locked && DESTDIR=/out scripts/install
++
+ # labwc with the mods layer, built at a pinned revision of elavo-labwc-mods.
+ # main until the first tag; pin a tag the way Folio is pinned after that.
+ # The stage clones elavo-labwc at the commit in that repo's LABWC_REF.
+@@ -99,6 +113,7 @@ COPY --from=keyboard /out /keyboard_files
+ COPY --from=system-settings /out /system_settings_files
+ COPY --from=app-bay /out /app_bay_files
+ COPY --from=applications /out /applications_files
++COPY --from=files /out /files_files
+ COPY --from=labwc /out /labwc_files
+ 
+ # Base Image
+diff --git a/build_files/build.sh b/build_files/build.sh
+index a33f15b..5dc7afd 100755
+--- a/build_files/build.sh
++++ b/build_files/build.sh
+@@ -35,6 +35,13 @@ dnf5 install -y \
+     foot \
+     nautilus \
+     sushi \
++    gvfs-smb \
++    gvfs-nfs \
++    gvfs-afc \
++    gvfs-mtp \
++    gvfs-gphoto2 \
++    gvfs-archive \
++    bsdtar \
+     xdg-desktop-portal \
+     xdg-desktop-portal-gtk \
+     xdg-desktop-portal-wlr \
+@@ -258,6 +265,33 @@ fc-cache -f "${sans_flex_dir}"
+ # Do not pipe this into grep -q. pipefail is on, grep -q closes at the
+ # first hit, and fc-list then dies with SIGPIPE (exit 141).
+ test -n "$(fc-list "Google Sans Flex" file)"
++# Files (the files stage) is the file manager: folders open in it
++# (inode/directory), and other apps' Show in Folder reaches it through
++# org.freedesktop.FileManager1. Its D-Bus service file replaces Nautilus'
++# for that name, so copy it after Nautilus is installed. Nautilus stays for
++# now: Folio's desktop uses its FileOperations2 interface and Sushi for
++# previews, and the panel's Files menus drive Nautilus windows; it leaves
++# the launcher so there is one Files.
++cp -a /ctx/files_files/. /
++test -x /usr/bin/elavo-files
++test -f /usr/share/applications/io.elavo.Files.desktop
++test -f /usr/share/dbus-1/services/io.elavo.Files.service
++grep -q '^Exec=/usr/bin/elavo-files ' /usr/share/dbus-1/services/org.freedesktop.FileManager1.service
++test -f /etc/xdg/autostart/io.elavo.Files.LocalSend.desktop
++desktop-file-edit --set-key=NoDisplay --set-value=true \
++    /usr/share/applications/org.gnome.Nautilus.desktop
++# The session's own defaults (XDG_CURRENT_DESKTOP=elavo), ahead of the
++# distribution's: Files for folders, Nautilus after it.
++cat > /usr/share/applications/elavo-mimeapps.list <<'MIMEAPPS'
++[Default Applications]
++inode/directory=io.elavo.Files.desktop;org.gnome.Nautilus.desktop;
++MIMEAPPS
++command -v openssl >/dev/null
++command -v zip >/dev/null
++command -v 7z >/dev/null
++command -v bsdtar >/dev/null
++test -f /usr/share/gvfs/mounts/smb.mount
++test -f /usr/share/gvfs/mounts/afc.mount
+ # App Bay, the catalog window (the app-bay stage). libsoup3 above is the
+ # library it links. The Applications allowlist locks an entry from this
+ # desktop file.
+@@ -272,6 +306,7 @@ update-desktop-database /usr/share/applications
+ grep -q '^application/vnd.flatpak.ref=.*io.elavo.Applications.desktop' /usr/share/applications/mimeinfo.cache
+ grep -q '^application/vnd.flatpak=.*io.elavo.Applications.desktop' /usr/share/applications/mimeinfo.cache
+ grep -q '^application/vnd.appimage=.*io.elavo.Applications.desktop' /usr/share/applications/mimeinfo.cache
++grep -q '^inode/directory=.*io.elavo.Files.desktop' /usr/share/applications/mimeinfo.cache
+ systemctl --global enable elavo-applications.service
+ systemctl enable elavo-applications-system.service elavo-applications-system.path
+ 
+diff --git a/system_files/usr/share/elavo-applications/system-applications b/system_files/usr/share/elavo-applications/system-applications
+index 38021cb..2df690f 100644
+--- a/system_files/usr/share/elavo-applications/system-applications
++++ b/system_files/usr/share/elavo-applications/system-applications
+@@ -3,6 +3,6 @@
+ # file exists. One desktop id per line, without .desktop.
+ io.elavo.SystemSettings
+ io.elavo.AppBay
+-org.gnome.Nautilus
++io.elavo.Files
+ io.elavo.AppLauncher
+ foot

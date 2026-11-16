@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use elavo_files_core::{eapp, entry, format, naming};
+use elavo_files_core::{eapp, entry, format, naming, prefs};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
@@ -193,11 +193,19 @@ async fn app_version(path: &std::path::Path, details: &eapp::Details) -> Option<
     None
 }
 
+/// What Get Info calls `file`, named `file_name`: a bundle as in the views.
+fn shown_name(file: &gio::File, file_name: &str) -> String {
+    file.path()
+        .and_then(|p| eapp::shown_path_name(&p))
+        .unwrap_or_else(|| file_name.to_owned())
+}
+
 /// Show the info window immediately, then fill it as the metadata arrives.
 pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
     let name = file
-        .basename()
-        .map(|s| s.to_string_lossy().into_owned())
+        .path()
+        .and_then(|p| eapp::shown_path_name(&p))
+        .or_else(|| file.basename().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| file.uri().to_string());
     let window = gtk::Window::builder()
         .application(&parent.application().expect("Files application"))
@@ -275,7 +283,7 @@ pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
             .spacing(4)
             .hexpand(true)
             .build();
-        let name = value(&entry::name(&info));
+        let name = value(&entry::title(&info));
         name.add_css_class("files-info-name");
         let size = value(&format::size_exact(entry::size(&info)));
         size.add_css_class("files-dim");
@@ -349,8 +357,17 @@ pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
             .margin_bottom(8)
             .margin_start(10)
             .build();
+        // A bundle's .eapp is kept on: the field leaves it out when hidden.
+        let file_name = info.name().to_string_lossy().into_owned();
+        let rename_text = move |file_name: &str| {
+            if bundle {
+                eapp::rename_text(file_name, prefs::show_bundle_extensions())
+            } else {
+                file_name.to_owned()
+            }
+        };
         let rename = gtk::Entry::builder()
-            .text(info.name().to_string_lossy().as_ref())
+            .text(rename_text(&file_name))
             .hexpand(true)
             .build();
         let rename_button = gtk::Button::with_label(&tr("Rename"));
@@ -373,7 +390,11 @@ pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
             let Some(window) = w.upgrade() else {
                 return;
             };
-            let new = entry.text().to_string();
+            let new = if bundle {
+                eapp::renamed(&entry.text())
+            } else {
+                entry.text().to_string()
+            };
             if let Err(e) = naming::check(&new) {
                 crate::dialogs::error(&window, &tr("That name can't be used"), &tr(e.message()));
                 return;
@@ -403,8 +424,9 @@ pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
                     b.set_sensitive(true);
                     match result {
                         Ok(file) => {
-                            window.set_title(Some(&format!("{new} {}", tr("Info"))));
-                            title.set_label(&new);
+                            let shown = shown_name(&file, &new);
+                            window.set_title(Some(&format!("{shown} {}", tr("Info"))));
+                            title.set_label(&shown);
                             c.replace(file);
                         }
                         Err(e) => crate::dialogs::error(
@@ -419,6 +441,39 @@ pub fn present(parent: &gtk::ApplicationWindow, file: &gio::File) {
         let f = rename_action.clone();
         rename_button.connect_clicked(move |_| f());
         rename.connect_activate(move |_| rename_action());
+        if bundle {
+            // Show application bundle extensions applies here at once too.
+            let (w, title, field, c) = (
+                window.downgrade(),
+                name.downgrade(),
+                rename.downgrade(),
+                current.clone(),
+            );
+            let shown_ext = std::cell::Cell::new(prefs::show_bundle_extensions());
+            crate::settings::connect(move |_, _| {
+                let (Some(window), Some(title), Some(field)) =
+                    (w.upgrade(), title.upgrade(), field.upgrade())
+                else {
+                    return;
+                };
+                let now = prefs::show_bundle_extensions();
+                if shown_ext.replace(now) == now {
+                    return;
+                }
+                let file = c.borrow().clone();
+                let Some(file_name) = file.basename().map(|b| b.to_string_lossy().into_owned())
+                else {
+                    return;
+                };
+                let shown = shown_name(&file, &file_name);
+                window.set_title(Some(&format!("{shown} {}", tr("Info"))));
+                title.set_label(&shown);
+                // Swap the .eapp in or out unless the field is being edited.
+                if field.text() == eapp::rename_text(&file_name, !now) {
+                    field.set_text(&rename_text(&file_name));
+                }
+            });
+        }
         content.append(
             &gtk::Expander::builder()
                 .label(tr("Name & Extension"))

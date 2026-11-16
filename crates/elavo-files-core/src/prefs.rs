@@ -47,6 +47,9 @@ pub struct Prefs {
     pub show_trash: bool,
     pub show_localsend: bool,
     pub show_extensions: bool,
+    /// Bundles keep their `.eapp` even with all extensions shown, unless
+    /// this is on too.
+    pub show_bundle_extensions: bool,
     pub warn_empty_trash: bool,
     pub confirm_delete: bool,
 }
@@ -63,6 +66,7 @@ impl Default for Prefs {
             show_trash: true,
             show_localsend: true,
             show_extensions: true,
+            show_bundle_extensions: false,
             warn_empty_trash: true,
             confirm_delete: true,
         }
@@ -93,6 +97,7 @@ impl Prefs {
             show_trash: b("Sidebar", "Trash", d.show_trash),
             show_localsend: b("Sidebar", "LocalSend", d.show_localsend),
             show_extensions: b("Advanced", "ShowAllExtensions", d.show_extensions),
+            show_bundle_extensions: b("Advanced", "ShowBundleExtensions", d.show_bundle_extensions),
             warn_empty_trash: b("Advanced", "WarnBeforeEmptyingTrash", d.warn_empty_trash),
             confirm_delete: b("Advanced", "ConfirmBeforeDeleting", d.confirm_delete),
         }
@@ -109,6 +114,11 @@ impl Prefs {
         f.set_boolean("Sidebar", "Trash", self.show_trash);
         f.set_boolean("Sidebar", "LocalSend", self.show_localsend);
         f.set_boolean("Advanced", "ShowAllExtensions", self.show_extensions);
+        f.set_boolean(
+            "Advanced",
+            "ShowBundleExtensions",
+            self.show_bundle_extensions,
+        );
         f.set_boolean("Advanced", "WarnBeforeEmptyingTrash", self.warn_empty_trash);
         f.set_boolean("Advanced", "ConfirmBeforeDeleting", self.confirm_delete);
     }
@@ -136,11 +146,13 @@ pub fn write(p: &Prefs) -> Result<(), glib::Error> {
 
 static FOLDERS_FIRST: AtomicBool = AtomicBool::new(false);
 static SHOW_EXTENSIONS: AtomicBool = AtomicBool::new(true);
+static SHOW_BUNDLE_EXTENSIONS: AtomicBool = AtomicBool::new(false);
 
 /// Make the settings that change how names sort and read take effect.
 pub fn apply(p: &Prefs) {
     FOLDERS_FIRST.store(p.folders_first, Ordering::Relaxed);
     SHOW_EXTENSIONS.store(p.show_extensions, Ordering::Relaxed);
+    SHOW_BUNDLE_EXTENSIONS.store(p.show_bundle_extensions, Ordering::Relaxed);
 }
 
 pub fn folders_first() -> bool {
@@ -151,6 +163,11 @@ pub fn show_extensions() -> bool {
     SHOW_EXTENSIONS.load(Ordering::Relaxed)
 }
 
+/// Whether bundles show their `.eapp`: both settings have to be on.
+pub fn show_bundle_extensions() -> bool {
+    show_extensions() && SHOW_BUNDLE_EXTENSIONS.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +176,20 @@ mod tests {
     fn defaults_when_missing() {
         let f = glib::KeyFile::new();
         assert_eq!(Prefs::from_keyfile(&f), Prefs::default());
+        assert!(!Prefs::default().show_bundle_extensions);
+    }
+
+    #[test]
+    fn bundle_extensions_key() {
+        let f = glib::KeyFile::new();
+        f.load_from_data(
+            "[Advanced]\nShowBundleExtensions=true\n",
+            glib::KeyFileFlags::NONE,
+        )
+        .unwrap();
+        assert!(Prefs::from_keyfile(&f).show_bundle_extensions);
+        Prefs::default().to_keyfile(&f);
+        assert!(!f.boolean("Advanced", "ShowBundleExtensions").unwrap());
     }
 
     #[test]
@@ -173,6 +204,7 @@ mod tests {
             show_trash: false,
             show_localsend: true,
             show_extensions: false,
+            show_bundle_extensions: true,
             warn_empty_trash: false,
             confirm_delete: false,
             ..Prefs::default()

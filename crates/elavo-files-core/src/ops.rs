@@ -174,7 +174,7 @@ fn stat(file: &gio::File) -> Stat {
         gio::Cancellable::NONE,
     )
     .map(|i| Stat {
-        size: i.size().max(0) as u64,
+        size: crate::entry::size(&i),
         modified: i.modification_date_time().map_or(0, |d| d.to_unix()),
         is_dir: i.file_type() == gio::FileType::Directory,
     })
@@ -282,7 +282,7 @@ impl Runner<'_> {
             return 0;
         };
         if info.file_type() != gio::FileType::Directory {
-            return info.size().max(0) as u64;
+            return crate::entry::size(&info);
         }
         let Ok(children) = file.enumerate_children("standard::name", NOFOLLOW, Some(self.cancel))
         else {
@@ -340,7 +340,7 @@ impl Runner<'_> {
             };
             src.copy(dst, flags, Some(self.cancel), Some(&mut progress))?;
         }
-        self.p.done_bytes = base + info.size().max(0) as u64;
+        self.p.done_bytes = base + crate::entry::size(&info);
         Ok(())
     }
 

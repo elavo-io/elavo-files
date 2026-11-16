@@ -419,11 +419,25 @@ fn advanced_page() -> gtk::Box {
     let p = get();
     let page = page();
     let g = group();
-    g.append(&check(
+    let all = check(
         &tr("Show all filename extensions"),
         p.show_extensions,
         |on| update(|p| p.show_extensions = on),
-    ));
+    );
+    // Depends on the one above: bundles only show their .eapp when every
+    // extension is shown, so it is dimmed while that is off.
+    let bundles = check(
+        &tr("Show application bundle extensions"),
+        p.show_bundle_extensions,
+        |on| update(|p| p.show_bundle_extensions = on),
+    );
+    bundles.set_margin_start(24);
+    bundles.add_css_class("files-settings-nested");
+    all.bind_property("active", &bundles, "sensitive")
+        .sync_create()
+        .build();
+    g.append(&all);
+    g.append(&bundles);
     g.append(&check(
         &tr("Show warning before emptying the Trash"),
         p.warn_empty_trash,

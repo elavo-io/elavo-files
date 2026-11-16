@@ -1,21 +1,27 @@
 //! Elavo Files, a Finder-style file manager on GIO.
 //!
 //! ```text
-//! elavo-files [FOLDER|URI]...   open a window for each, or the home folder
-//! elavo-files --localsend-daemon receive with LocalSend, with no window
+//! elavo-files [FOLDER|FILE|URI]...  open a window for each folder, or the
+//!                                  home folder; a file shows selected in its folder
+//! elavo-files --localsend-daemon    receive with LocalSend, with no window
+//! elavo-files --gapplication-service  started by D-Bus (io.elavo.Files,
+//!                                  org.freedesktop.FileManager1)
 //! ```
 
 mod app;
 mod bundles;
 mod clip;
 mod columns;
+mod connect;
 mod dialogs;
+mod filemanager1;
 mod gallery;
 mod i18n;
 mod info;
 mod jobs;
 mod localsend;
 mod menus;
+mod mounts;
 mod preview;
 mod quicklook;
 mod rubberband;

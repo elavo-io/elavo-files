@@ -1,5 +1,8 @@
 //! The application: one instance per session, a window per folder opened,
-//! and the keyboard shortcuts.
+//! and the keyboard shortcuts. Folders and files given on the command line
+//! or by another app (`gio open`, `xdg-open`, the FileManager1 interface)
+//! come to the running instance: a folder opens in a window, a file is
+//! shown selected in its folder.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,7 +16,15 @@ thread_local! {
     static WINDOWS: RefCell<Vec<Rc<Window>>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn open_window(app: &gtk::Application, folder: Option<gio::File>) {
+pub fn open_window(app: &gtk::Application, folder: Option<gio::File>) -> Rc<Window> {
+    open_window_for(app, folder, None)
+}
+
+fn open_window_for(
+    app: &gtk::Application,
+    folder: Option<gio::File>,
+    startup_id: Option<&str>,
+) -> Rc<Window> {
     let folder = folder.unwrap_or_else(crate::settings::new_window_folder);
     let w = Window::new(app, folder);
     let weak = Rc::downgrade(&w);
@@ -24,8 +35,113 @@ pub fn open_window(app: &gtk::Application, folder: Option<gio::File>) {
         }
         glib::Propagation::Proceed
     });
+    if let Some(id) = startup_id {
+        w.window.set_startup_id(id);
+    }
     w.window.present();
-    WINDOWS.with(|all| all.borrow_mut().push(w));
+    WINDOWS.with(|all| all.borrow_mut().push(w.clone()));
+    w
+}
+
+/// Whether `file` opens as a folder: a directory, a place that has to be
+/// mounted first, or anything not on this computer GIO can't tell yet.
+/// Application bundles and files are shown in their folder instead.
+fn is_folder(file: &gio::File) -> bool {
+    if file.uri().ends_with(".eapp") || file.uri().ends_with(".eapp/") {
+        return false;
+    }
+    match file.query_file_type(gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) {
+        gio::FileType::Directory | gio::FileType::Mountable => true,
+        gio::FileType::Unknown => !file.is_native() || file.parent().is_none(),
+        _ => false,
+    }
+}
+
+/// Show folders, or items selected in their folders, or Get Info for
+/// items: for the command line and FileManager1.
+pub fn show(
+    app: &gtk::Application,
+    what: crate::filemanager1::Show,
+    files: &[gio::File],
+    startup_id: Option<&str>,
+) {
+    use crate::filemanager1::Show;
+    if files.is_empty() {
+        if what == Show::Folders {
+            open_window_for(app, None, startup_id);
+        }
+        return;
+    }
+    if what == Show::Folders {
+        for f in files {
+            open_window_for(app, Some(f.clone()), startup_id);
+        }
+        return;
+    }
+    // One window per folder, the items in it selected together.
+    let mut groups: Vec<(gio::File, Vec<gio::File>)> = Vec::new();
+    for f in files {
+        let Some(parent) = f.parent() else {
+            open_window_for(app, Some(f.clone()), startup_id);
+            continue;
+        };
+        match groups.iter_mut().find(|(p, _)| p.equal(&parent)) {
+            Some((_, items)) => items.push(f.clone()),
+            None => groups.push((parent, vec![f.clone()])),
+        }
+    }
+    for (parent, items) in groups {
+        let existing = WINDOWS.with(|all| all.borrow().iter().find(|w| w.shows(&parent)).cloned());
+        let w = match existing {
+            Some(w) => {
+                if let Some(id) = startup_id {
+                    w.window.set_startup_id(id);
+                }
+                w.window.present();
+                w
+            }
+            None => open_window_for(app, Some(parent), startup_id),
+        };
+        w.show_items(&items);
+        if what == Show::Properties {
+            for item in &items {
+                crate::info::present(&w.window, item);
+            }
+        }
+    }
+}
+
+/// Windows showing a place under `root` go Home: it is being unmounted.
+pub fn leave(root: &gio::File) {
+    WINDOWS.with(|all| {
+        for w in all.borrow().iter() {
+            w.leave(root);
+        }
+    });
+}
+
+fn mounts_changed() {
+    WINDOWS.with(|all| {
+        for w in all.borrow().iter() {
+            w.mounts_changed();
+        }
+    });
+}
+
+/// A drive or share about to go, by Eject here or elsewhere: leave it
+/// first, so Files doesn't hold it busy.
+fn follow_unmounts() {
+    let monitor = gio::VolumeMonitor::get();
+    monitor.connect_mount_pre_unmount(|_, m| leave(&m.root()));
+    monitor.connect_mount_removed(|_, m| {
+        leave(&m.root());
+        mounts_changed();
+    });
+    // Eject (Ctrl+E) follows what is mounted, which GVfs may report after
+    // a window has opened.
+    monitor.connect_mount_added(|_, _| mounts_changed());
+    monitor.connect_mount_changed(|_, _| mounts_changed());
+    std::mem::forget(monitor);
 }
 
 /// Show Hidden Files in every window (Files Settings), and for windows
@@ -121,6 +237,8 @@ const ACCELS: &[(&str, &[&str])] = &[
     ("win.get-info", &["<Control>i"]),
     ("win.open-terminal", &["<Control><Alt>t"]),
     ("app.settings", &["<Control>comma"]),
+    ("win.connect-server", &["<Control>k"]),
+    ("win.eject", &["<Control>e"]),
 ];
 
 thread_local! {
@@ -186,6 +304,8 @@ pub fn run() -> glib::ExitCode {
         app.add_action(&ls_settings);
         crate::settings::get();
         follow_settings();
+        follow_unmounts();
+        crate::filemanager1::start(app);
         crate::localsend::start(app);
     });
     app.connect_activate(|app| {
@@ -194,11 +314,17 @@ pub fn run() -> glib::ExitCode {
             DAEMON_HOLD.with(|h| h.replace(Some(app.hold())));
             return;
         }
-        open_window(app, None)
+        open_window(app, None);
     });
     app.connect_open(|app, files, _| {
-        for file in files {
-            open_window(app, Some(file.clone()));
+        use crate::filemanager1::Show;
+        let (folders, items): (Vec<gio::File>, Vec<gio::File>) =
+            files.iter().cloned().partition(is_folder);
+        if !folders.is_empty() {
+            show(app, Show::Folders, &folders, None);
+        }
+        if !items.is_empty() {
+            show(app, Show::Items, &items, None);
         }
     });
     app.run()

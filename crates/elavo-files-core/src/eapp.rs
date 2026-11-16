@@ -2,8 +2,10 @@
 //! elavo-applications, each with an `entry.json` and a `launch.desktop`.
 //!
 //! Files shows a bundle as the application, not as a folder: its own name
-//! (no `.eapp`) and icon, and opening it starts the application. The rules
-//! follow elavo-applications' Nautilus module:
+//! (no `.eapp`) and icon, and opening it starts the application. With both
+//! Show all filename extensions and Show application bundle extensions on,
+//! it shows its file name, `.eapp` and all, instead. The rules follow
+//! elavo-applications' Nautilus module:
 //!
 //! - The shared Applications folder is `/Applications` (or
 //!   `$ELAVO_SHARED_APPLICATIONS`); each person also has `~/Applications`.
@@ -322,9 +324,107 @@ pub fn is_package(info: &gio::FileInfo) -> bool {
     is_marked(info) || info.attribute_string(PACKAGE).is_some_and(|m| m == "1")
 }
 
+/// What a bundle is shown as: the application's name, or its file name,
+/// `.eapp` included, when bundle extensions are shown.
+pub fn shown_name(app: &str, file_name: &str, with_suffix: bool) -> String {
+    if with_suffix {
+        file_name.to_owned()
+    } else {
+        app.to_owned()
+    }
+}
+
+/// How the bundle at `path` is shown, following Files Settings; `None` for
+/// anything that isn't a bundle.
+pub fn shown_path_name(path: &Path) -> Option<String> {
+    if !is_bundle(path) {
+        return None;
+    }
+    let file_name = path.file_name()?.to_string_lossy().into_owned();
+    let with_suffix = crate::prefs::show_bundle_extensions();
+    let app = if with_suffix {
+        String::new()
+    } else {
+        name(path)
+    };
+    Some(shown_name(&app, &file_name, with_suffix))
+}
+
+/// The text a bundle's rename field starts with: its file name, less the
+/// `.eapp` when that is hidden.
+pub fn rename_text(file_name: &str, with_suffix: bool) -> String {
+    if with_suffix {
+        file_name.to_owned()
+    } else {
+        file_name
+            .strip_suffix(SUFFIX)
+            .unwrap_or(file_name)
+            .to_owned()
+    }
+}
+
+/// How much of a bundle's rename field is selected at first: the name,
+/// not the `.eapp`.
+pub fn rename_stem_chars(text: &str) -> usize {
+    text.strip_suffix(SUFFIX).unwrap_or(text).chars().count()
+}
+
+/// The file name a bundle's rename field asks for. The `.eapp` stays on
+/// whether or not it was shown, so a rename can't turn the application
+/// back into a folder.
+pub fn renamed(text: &str) -> String {
+    if text.ends_with(SUFFIX) && text.len() > SUFFIX.len() {
+        text.to_owned()
+    } else {
+        format!("{text}{SUFFIX}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_names() {
+        assert_eq!(shown_name("Notes", "notes-app.eapp", false), "Notes");
+        assert_eq!(
+            shown_name("Notes", "notes-app.eapp", true),
+            "notes-app.eapp"
+        );
+        assert_eq!(rename_text("Notes.eapp", false), "Notes");
+        assert_eq!(rename_text("Notes.eapp", true), "Notes.eapp");
+        assert_eq!(rename_stem_chars("Notes.eapp"), 5);
+        assert_eq!(rename_stem_chars("Notes"), 5);
+        assert_eq!(rename_stem_chars("Né.v2.eapp"), 5);
+    }
+
+    #[test]
+    fn renaming_keeps_the_suffix() {
+        // Hidden: the field has no .eapp; it goes back on.
+        assert_eq!(renamed("Jot"), "Jot.eapp");
+        // Shown: kept as typed, or put back if it was deleted.
+        assert_eq!(renamed("Jot.eapp"), "Jot.eapp");
+        assert_eq!(renamed("Jot.eap"), "Jot.eap.eapp");
+        assert_eq!(renamed("Jot.v2"), "Jot.v2.eapp");
+        assert_eq!(renamed(".eapp"), ".eapp.eapp");
+        // An unchanged field gives the old file name back, so no rename.
+        for shown in [false, true] {
+            assert_eq!(renamed(&rename_text("Notes.eapp", shown)), "Notes.eapp");
+        }
+    }
+
+    #[test]
+    fn shown_path_names() {
+        let d = scratch("shown");
+        let b = bundle(&d, "notes-app.eapp", r#"{"name": "Notes"}"#, "");
+        let plain = d.join("Folder.eapp");
+        std::fs::create_dir_all(&plain).unwrap();
+        // Settings start with bundle extensions hidden.
+        assert_eq!(shown_path_name(&b).as_deref(), Some("Notes"));
+        assert_eq!(shown_path_name(&plain), None);
+        assert_eq!(shown_path_name(&d), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn bundle(dir: &Path, name: &str, json: &str, desktop: &str) -> PathBuf {
         let b = dir.join(name);

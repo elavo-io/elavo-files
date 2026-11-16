@@ -129,6 +129,14 @@
 
 .files-sidebar row.files-fav-drop-into {
   background-color: alpha(@accent_color, 0.28);
+  /* A ring as well as the fill, so "into this folder" can't be taken
+   * for the insertion line. */
+  box-shadow: inset 0 0 0 2px var(--accent-color, @accent_color);
+}
+
+/* A favorite whose folder is gone: dimmed until removed or back. */
+.files-sidebar row.files-fav-missing > revealer {
+  opacity: 0.5;
 }
 
 .files-sidebar row.files-fav-dragging {
@@ -763,3 +771,37 @@ button.files-scope:checked { background: alpha(currentColor, 0.1); font-weight: 
   color: @theme_selected_bg_color;
 }
 .files-ls-status { font-size: 0.9em; }
+
+/* Drives and network shares: Eject at the end of the row, as in Finder;
+   a drive volume not mounted yet is dimmed until clicked. */
+.files-sidebar row button.files-eject {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  margin: -2px -4px -2px 0;
+  border-radius: 4px;
+  color: alpha(currentColor, 0.6);
+}
+.files-sidebar row button.files-eject:hover {
+  color: currentColor;
+  background: alpha(currentColor, 0.10);
+}
+.files-sidebar row.files-volume-unmounted > box {
+  opacity: 0.55;
+}
+
+/* Connect to Server. */
+window.files-connect,
+window.files-connect > decoration { border-radius: 16px; }
+.files-connect entry { min-height: 30px; border-radius: 7px; }
+.files-connect-hint { font-size: 0.9em; }
+.files-connect-error { font-size: 0.92em; }
+.files-connect-recent-scroll {
+  border-radius: 12px;
+  background: alpha(currentColor, 0.04);
+}
+.files-connect-recent { background: transparent; padding: 4px; }
+.files-connect-recent row { border-radius: 8px; padding: 4px 8px; }
+.files-connect-recent row:selected { background-color: alpha(currentColor, 0.12); color: @theme_fg_color; }
+.files-connect-kind { font-size: 0.85em; }
+.files-connect button.files-connect-remove { min-width: 24px; min-height: 24px; padding: 0; }

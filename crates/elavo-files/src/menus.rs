@@ -38,6 +38,16 @@ pub struct Selection<'a> {
     pub archives: bool,
     /// One folder, for Open in Terminal.
     pub folder: bool,
+    /// The drive or share the one item is the top of, for Eject.
+    pub eject: Option<&'a str>,
+}
+
+fn eject_item(name: &str) -> gio::MenuItem {
+    item(
+        &format!("{} \u{201c}{name}\u{201d}", tr("Eject")),
+        "win.eject",
+        Some("<Control>e"),
+    )
 }
 
 fn quoted_or_count(s: &Selection) -> String {
@@ -135,6 +145,9 @@ pub fn items(s: &Selection) -> gio::Menu {
         first.append_submenu(Some(&tr("Open With")), &open_with(s.content_type));
     }
     menu.append_section(None, &first);
+    if let Some(name) = s.eject {
+        menu.append_section(None, &section(&[eject_item(name)]));
+    }
     menu.append_section(
         None,
         &section(&[item(&tr("Move to Trash"), "win.trash", Some("Delete"))]),
@@ -204,8 +217,9 @@ pub fn items(s: &Selection) -> gio::Menu {
     menu
 }
 
-/// The menu for an empty part of the folder.
-pub fn background(in_trash: bool) -> gio::Menu {
+/// The menu for an empty part of the folder; `eject` names the drive or
+/// share the folder is on.
+pub fn background(in_trash: bool, eject: Option<&str>) -> gio::Menu {
     let menu = gio::Menu::new();
     if in_trash {
         menu.append_section(
@@ -243,6 +257,9 @@ pub fn background(in_trash: bool) -> gio::Menu {
                 ),
             ]),
         );
+        if let Some(name) = eject {
+            menu.append_section(None, &section(&[eject_item(name)]));
+        }
     }
     let view = gio::Menu::new();
     view.append_section(

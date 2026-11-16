@@ -219,7 +219,7 @@ impl QuickLook {
         self.stop_media();
         self.root.set_visible(true);
 
-        self.title.set_label(&entry::name(info));
+        self.title.set_label(&entry::title(info));
         let dir = entry::is_dir(info);
         let kind = entry::kind(info);
         let mut meta = vec![kind];

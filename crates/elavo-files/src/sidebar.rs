@@ -1,7 +1,8 @@
-//! The sidebar: Recents, Favorites, and Locations (home, mounted drives,
-//! Network, LocalSend with the devices nearby, Trash). Mounted
-//! drives follow GIO's volume monitor. Folders, drives and the Trash take
-//! dropped files.
+//! The sidebar: Recents, Favorites, and Locations (home, drives and
+//! network shares, Network, LocalSend with the devices nearby, Trash).
+//! Drives and shares follow GIO's volume monitor; mounted ones have an
+//! Eject button, and drive volumes not mounted yet mount when clicked.
+//! Folders, drives and the Trash take dropped files.
 //!
 //! Favorites are the person's, as in Finder (`favorites` in the core keeps
 //! them): a folder dropped between two favorites is added there, with a
@@ -28,6 +29,8 @@ type SidebarFn = Box<dyn Fn(&Rc<Sidebar>)>;
 /// What a favorite being dragged offers: only Files knows it, so another
 /// app takes nothing and letting go over it removes the favorite.
 const FAVORITE_MIME: &str = "application/x-elavo-favorite";
+/// A drive volume not mounted yet; mounted when its row is clicked.
+const VOLUME_PREFIX: &str = "elavo-volume:";
 /// How long the removal takes to fade and close up.
 const POOF_MS: u32 = 220;
 
@@ -178,12 +181,33 @@ fn favorite_label(fav: &Favorite) -> (String, &'static str) {
     }
     let name = fav.name.clone().unwrap_or_else(|| {
         let file = gio::File::for_uri(&fav.uri);
+        // Kept out of the sidebar, but a bookmark made elsewhere may name
+        // one: shown as in the views.
+        if let Some(name) = file.path().and_then(|p| eapp::shown_path_name(&p)) {
+            return name;
+        }
         file.basename()
             .map(|b| glib::filename_display_name(b).to_string())
             .filter(|b| !b.is_empty() && b != "/")
             .unwrap_or_else(|| file.parse_name().to_string())
     });
     (name, "folder-symbolic")
+}
+
+/// How far into a favorite a drop has to be to go into its folder.
+const INTO_FROM: f64 = 0.3;
+
+/// Whether dropped files may go into a favorite's folder. Home and its
+/// standard folders (Pictures, Documents...) are only ever added: moving
+/// one by a slip onto a favorite would break every app that uses it.
+fn can_go_into(files: &[gio::File]) -> bool {
+    !files.iter().any(|f| favorites::is_standard(&f.uri()))
+}
+
+/// Whether a favorite's folder is gone. Only local ones are checked; a
+/// share may just not be mounted.
+fn is_missing(uri: &str) -> bool {
+    gio::File::for_uri(uri).path().is_some_and(|p| !p.exists())
 }
 
 /// A folder the sidebar can keep: not an application bundle.
@@ -325,6 +349,23 @@ fn item(name: &str, icon: &gio::Icon, uri: &str) -> gtk::ListBoxRow {
     row
 }
 
+/// A mount's name; a network share says which folder of the server it is
+/// when GVfs names it by the server alone (WebDAV, FTP, SFTP), so two
+/// shares on one server can be told apart.
+pub fn mount_label(mount: &gio::Mount) -> String {
+    let name = mount.name().to_string();
+    let root = mount.root();
+    if root.is_native() {
+        return name;
+    }
+    match root.basename().map(|b| b.to_string_lossy().into_owned()) {
+        Some(base) if base != "/" && !base.is_empty() && !name.contains(&base) => {
+            format!("{base} {} {name}", tr("on"))
+        }
+        _ => name,
+    }
+}
+
 fn place_row(place: &Place, cells: &Rc<Cells>) -> gtk::ListBoxRow {
     let (name, icon) = label(place.id);
     let row = item(&name, &gio::ThemedIcon::new(icon).upcast(), &place.uri);
@@ -380,13 +421,6 @@ impl Sidebar {
             .child(&list)
             .css_classes(["files-sidebar"])
             .build();
-        let o = open.clone();
-        list.connect_row_activated(move |_, row| {
-            let uri = row.widget_name();
-            if !uri.is_empty() {
-                o(gio::File::for_uri(&uri));
-            }
-        });
         let this = Rc::new(Self {
             widget,
             list,
@@ -407,6 +441,20 @@ impl Sidebar {
             me: RefCell::default(),
         });
         this.me.replace(Rc::downgrade(&this));
+        let weak = Rc::downgrade(&this);
+        this.list.connect_row_activated(move |_, row| {
+            let Some(s) = weak.upgrade() else {
+                return;
+            };
+            let uri = row.widget_name();
+            if let Some(id) = uri.strip_prefix(VOLUME_PREFIX) {
+                s.mount_volume(id);
+            } else if row.has_css_class("files-fav-missing") && is_missing(&uri) {
+                s.offer_removal(&uri);
+            } else if !uri.is_empty() {
+                (s.open)(gio::File::for_uri(&uri));
+            }
+        });
         SIDEBARS.with(|all| all.borrow_mut().push(Rc::downgrade(&this)));
         follow_settings();
         this.rebuild();
@@ -420,7 +468,13 @@ impl Sidebar {
         this.monitor.connect_mount_added(move |_, _| r());
         let r = refresh.clone();
         this.monitor.connect_mount_removed(move |_, _| r());
-        this.monitor.connect_mount_changed(move |_, _| refresh());
+        let r = refresh.clone();
+        this.monitor.connect_mount_changed(move |_, _| r());
+        let r = refresh.clone();
+        this.monitor.connect_volume_added(move |_, _| r());
+        let r = refresh.clone();
+        this.monitor.connect_volume_removed(move |_, _| r());
+        this.monitor.connect_volume_changed(move |_, _| refresh());
         let weak = Rc::downgrade(&this);
         crate::localsend::connect_changed(move || match weak.upgrade() {
             Some(s) => {
@@ -560,18 +614,33 @@ impl Sidebar {
         if prefs.show_home {
             self.list.append(&place_row(&places::home(), &self.cells));
         }
-        for mount in self.monitor.mounts() {
-            if mount.is_shadowed() || !prefs.show_drives {
-                continue;
+        let mounts: Vec<gio::Mount> = self
+            .monitor
+            .mounts()
+            .into_iter()
+            .filter(|m| !m.is_shadowed())
+            .collect();
+        // Drives first, then network shares, as in Finder.
+        let remote = |m: &gio::Mount| !m.root().is_native();
+        for mount in mounts.iter().filter(|m| !remote(m)) {
+            if prefs.show_drives {
+                self.append_mount(mount);
             }
-            let uri = mount.root().uri().to_string();
-            let row = item(&mount.name(), &mount.symbolic_icon(), &uri);
-            take_drops(&row, &uri, &self.cells);
-            self.list.append(&row);
+        }
+        if prefs.show_drives {
+            for volume in crate::mounts::unmounted_volumes() {
+                self.append_volume(&volume);
+            }
+        }
+        for mount in mounts.iter().filter(|m| remote(m)) {
+            if prefs.show_network {
+                self.append_mount(mount);
+            }
         }
         if prefs.show_network {
-            self.list
-                .append(&place_row(&places::network(), &self.cells));
+            let row = place_row(&places::network(), &self.cells);
+            self.network_menu_on(&row);
+            self.list.append(&row);
         }
         if prefs.show_localsend {
             self.append_localsend();
@@ -579,6 +648,153 @@ impl Sidebar {
         if prefs.show_trash {
             self.list.append(&place_row(&places::trash(), &self.cells));
         }
+    }
+
+    /// A drive or network share, with its Eject button when it has one.
+    fn append_mount(&self, mount: &gio::Mount) {
+        let root = mount.root();
+        let uri = root.uri().to_string();
+        let row = item(&mount_label(mount), &mount.symbolic_icon(), &uri);
+        if !root.is_native() {
+            row.set_tooltip_text(Some(&crate::mounts::shown(&root)));
+        }
+        row.add_css_class("files-mount-row");
+        take_drops(&row, &uri, &self.cells);
+        if crate::mounts::can_eject(mount) {
+            if let Some(content) = row.child().and_downcast::<gtk::Box>() {
+                let eject = gtk::Button::builder()
+                    .icon_name("media-eject-symbolic")
+                    .tooltip_text(format!(
+                        "{} \u{201c}{}\u{201d}",
+                        tr("Eject"),
+                        mount_label(mount)
+                    ))
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "files-eject"])
+                    .build();
+                eject.update_property(&[gtk::accessible::Property::Label(&format!(
+                    "{} {}",
+                    tr("Eject"),
+                    mount_label(mount)
+                ))]);
+                let (weak, m) = (self.me.borrow().clone(), mount.clone());
+                eject.connect_clicked(move |b| {
+                    b.set_sensitive(false);
+                    if let Some(s) = weak.upgrade() {
+                        crate::mounts::eject(s.window().as_ref(), &m);
+                    }
+                });
+                content.append(&eject);
+            }
+        }
+        self.mount_menu_on(&row, &uri);
+        self.list.append(&row);
+    }
+
+    /// A drive volume that isn't mounted: dimmed until clicked.
+    fn append_volume(&self, volume: &gio::Volume) {
+        let icon = volume.symbolic_icon();
+        let row = item(
+            &volume.name(),
+            &icon,
+            &format!("{VOLUME_PREFIX}{}", crate::mounts::volume_id(volume)),
+        );
+        row.add_css_class("files-volume-unmounted");
+        row.set_tooltip_text(Some(&format!(
+            "{} \u{2014} {}",
+            volume.name(),
+            tr("not mounted; click to mount")
+        )));
+        self.list.append(&row);
+    }
+
+    fn window(&self) -> Option<gtk::Window> {
+        self.widget.root().and_downcast::<gtk::Window>()
+    }
+
+    fn mount_volume(&self, id: &str) {
+        let Some(volume) = crate::mounts::volume_by_id(id) else {
+            return;
+        };
+        let (open, parent) = (self.open.clone(), self.window());
+        let p = parent.clone();
+        let name = volume.name().to_string();
+        crate::mounts::mount_volume(parent.as_ref(), &volume, move |r| match r {
+            Ok(root) => open(root),
+            Err(e) if crate::mounts::quietly_cancelled(&e) => {}
+            Err(e) => {
+                if let Some(p) = p {
+                    crate::dialogs::error(
+                        &p,
+                        &format!(
+                            "\u{201c}{name}\u{201d} {}",
+                            tr("couldn\u{2019}t be mounted.")
+                        ),
+                        e.message(),
+                    );
+                }
+            }
+        });
+    }
+
+    /// Right click on a drive or share: Open, Get Info and Eject.
+    fn mount_menu_on(&self, row: &gtk::ListBoxRow, uri: &str) {
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        let (weak, uri) = (self.me.borrow().clone(), uri.to_owned());
+        click.connect_pressed(move |g, _, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            let (Some(s), Some(w)) = (weak.upgrade(), g.widget()) else {
+                return;
+            };
+            s.menu_uri.replace(uri.clone());
+            let menu = gio::Menu::new();
+            let first = gio::Menu::new();
+            first.append(Some(&tr("Open")), Some("sidebar.open"));
+            menu.append_section(None, &first);
+            if let Some(m) = crate::mounts::ejectable_root(&gio::File::for_uri(&uri)) {
+                let second = gio::Menu::new();
+                second.append(
+                    Some(&format!(
+                        "{} \u{201c}{}\u{201d}",
+                        tr("Eject"),
+                        mount_label(&m)
+                    )),
+                    Some("sidebar.eject"),
+                );
+                menu.append_section(None, &second);
+            }
+            s.show_menu(&menu, &w, x, y);
+        });
+        row.add_controller(click);
+    }
+
+    /// Right click on Network: Open and Connect to Server.
+    fn network_menu_on(&self, row: &gtk::ListBoxRow) {
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        let weak = self.me.borrow().clone();
+        click.connect_pressed(move |g, _, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            let (Some(s), Some(w)) = (weak.upgrade(), g.widget()) else {
+                return;
+            };
+            s.menu_uri.replace(places::network().uri);
+            let menu = gio::Menu::new();
+            let first = gio::Menu::new();
+            first.append(Some(&tr("Open")), Some("sidebar.open"));
+            menu.append_section(None, &first);
+            let second = gio::Menu::new();
+            second.append(
+                Some(&tr("Connect to Server\u{2026}")),
+                Some("win.connect-server"),
+            );
+            menu.append_section(None, &second);
+            s.show_menu(&menu, &w, x, y);
+        });
+        row.add_controller(click);
     }
 
     /// A favorite: inside a revealer, so removing it can close up.
@@ -595,7 +811,16 @@ impl Sidebar {
             .css_classes(["files-favorite"])
             .build();
         row.set_widget_name(&fav.uri);
-        row.set_tooltip_text(Some(&gio::File::for_uri(&fav.uri).parse_name()));
+        let shown = gio::File::for_uri(&fav.uri).parse_name().to_string();
+        if is_missing(&fav.uri) {
+            row.add_css_class("files-fav-missing");
+            row.set_tooltip_text(Some(&format!(
+                "{shown} \u{2014} {}",
+                tr("can\u{2019}t be found")
+            )));
+        } else {
+            row.set_tooltip_text(Some(&shown));
+        }
         self.menu_on(&row, Some(&fav.uri));
 
         let drag = gtk::DragSource::builder()
@@ -659,6 +884,33 @@ impl Sidebar {
         row
     }
 
+    /// A favorite whose folder is gone: say so, and offer to remove it
+    /// rather than dropping it silently, as it may come back (a drive).
+    fn offer_removal(&self, uri: &str) {
+        let (name, _) = favorite_label(&Favorite::new(uri));
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!(
+                "\u{201c}{name}\u{201d} {}",
+                tr("can\u{2019}t be found.")
+            ))
+            .detail(format!(
+                "{} {}",
+                gio::File::for_uri(uri).parse_name(),
+                tr("may have been moved, renamed or deleted. Remove it from the sidebar?")
+            ))
+            .buttons([tr("Keep"), tr("Remove")])
+            .cancel_button(0)
+            .default_button(1)
+            .build();
+        let (weak, uri) = (self.me.borrow().clone(), uri.to_owned());
+        dialog.choose(self.window().as_ref(), gio::Cancellable::NONE, move |r| {
+            if let (Ok(1), Some(s)) = (r, weak.upgrade()) {
+                s.poof(&uri);
+            }
+        });
+    }
+
     /// Remove a favorite with a short fade, the folder untouched.
     fn poof(&self, uri: &str) {
         let row = self
@@ -699,8 +951,9 @@ impl Sidebar {
     // Dropping on Favorites
 
     /// Where a drop at `y` (in the list) lands. Over a favorite, the top and
-    /// bottom quarters are the gaps around it and the middle the folder
-    /// itself, when `into` allows it.
+    /// bottom 30% are the gaps around it and only the middle 40% the folder
+    /// itself, when `into` allows it: adding is what a drop on Favorites
+    /// usually means, so its zones are the larger.
     fn zone(&self, y: f64, into: bool) -> Option<Zone> {
         let row = self.list.row_at_y(y as i32)?;
         let rows = self.rows.borrow();
@@ -711,11 +964,13 @@ impl Sidebar {
             return Some(Zone::Insert(rows.len()));
         }
         let i = rows.iter().position(|r| r == &row)?;
+        // Nothing can go into a folder that is gone.
+        let into = into && !row.has_css_class("files-fav-missing");
         let b = row.compute_bounds(&self.list)?;
         let at = ((y - b.y() as f64) / (b.height() as f64).max(1.0)).clamp(0.0, 1.0);
         Some(match (into, at) {
-            (true, a) if a < 0.25 => Zone::Insert(i),
-            (true, a) if a > 0.75 => Zone::Insert(i + 1),
+            (true, a) if a < INTO_FROM => Zone::Insert(i),
+            (true, a) if a > 1.0 - INTO_FROM => Zone::Insert(i + 1),
             (true, _) => Zone::Into(i),
             (false, a) if a < 0.5 => Zone::Insert(i),
             (false, _) => Zone::Insert(i + 1),
@@ -795,7 +1050,7 @@ impl Sidebar {
             };
             let files = t.value().map(|v| views::files_of(&v)).unwrap_or_default();
             let folders = s.has_folder(&files);
-            let zone = s.zone(y, true);
+            let zone = s.zone(y, can_go_into(&files));
             let action = match zone {
                 Some(Zone::Insert(_)) if folders => Self::add_action(views::offered(t)),
                 Some(Zone::Into(i)) => {
@@ -828,12 +1083,13 @@ impl Sidebar {
                 return false;
             };
             s.unmark();
-            match s.zone(y, true) {
+            let files = views::files_of(value);
+            match s.zone(y, can_go_into(&files)) {
                 Some(Zone::Insert(at)) => {
                     let mut list = current();
                     let mut at = at.min(list.len());
                     let mut any = false;
-                    for f in views::files_of(value).iter().filter(|f| is_folder(f)) {
+                    for f in files.iter().filter(|f| is_folder(f)) {
                         let uri = f.uri();
                         let from = list.iter().position(|x| same_uri(&x.uri, &uri));
                         favorites::insert(&mut list, Favorite::new(&uri), at);
@@ -941,6 +1197,15 @@ impl Sidebar {
                 let uri = s.menu_uri.borrow().clone();
                 if !uri.is_empty() {
                     s.poof(&uri);
+                }
+            }),
+        );
+        add(
+            "eject",
+            Box::new(|s| {
+                let uri = s.menu_uri.borrow().clone();
+                if let Some(m) = crate::mounts::ejectable_root(&gio::File::for_uri(&uri)) {
+                    crate::mounts::eject(s.window().as_ref(), &m);
                 }
             }),
         );
@@ -1073,6 +1338,6 @@ impl Sidebar {
             .mounts()
             .into_iter()
             .find(|m| same_uri(&m.root().uri(), uri))
-            .map(|m| m.name().to_string())
+            .map(|m| mount_label(&m))
     }
 }

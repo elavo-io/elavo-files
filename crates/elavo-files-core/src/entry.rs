@@ -20,14 +20,30 @@ pub fn name(info: &gio::FileInfo) -> String {
 }
 
 /// The name a view shows: without its extension when Show All Filename
-/// Extensions is off (folders and applications keep theirs as they are).
+/// Extensions is off (folders keep theirs as they are). A bundle shows as
+/// its application unless bundle extensions are shown too.
 pub fn label(info: &gio::FileInfo) -> String {
+    if crate::eapp::is_marked(info) {
+        return title(info);
+    }
     let name = name(info);
     if crate::prefs::show_extensions() || is_dir(info) {
         return name;
     }
     let (stem, _) = crate::naming::split(&name, false);
     stem.to_owned()
+}
+
+/// The name an item is called by on its own, in Get Info, Quick Look and
+/// the preview: its full name, but a bundle's follows Show application
+/// bundle extensions as in the views.
+pub fn title(info: &gio::FileInfo) -> String {
+    let shown = name(info);
+    if !crate::eapp::is_marked(info) {
+        return shown;
+    }
+    let file_name = info.name().to_string_lossy().into_owned();
+    crate::eapp::shown_name(&shown, &file_name, crate::prefs::show_bundle_extensions())
 }
 
 /// A folder, or an item in Recents or Trash that stands for one.
@@ -39,7 +55,10 @@ pub fn is_dir(info: &gio::FileInfo) -> bool {
 
 /// Dot files and backup files (`name~`), as Nautilus hides them.
 pub fn is_hidden(info: &gio::FileInfo) -> bool {
-    info.is_hidden() || info.is_backup()
+    // Some backends (WebDAV) leave these out.
+    let has = |a: &str| info.has_attribute(a);
+    (has("standard::is-hidden") && info.is_hidden())
+        || (has("standard::is-backup") && info.is_backup())
 }
 
 pub fn content_type(info: &gio::FileInfo) -> String {
@@ -74,7 +93,11 @@ pub fn set_kind(info: &gio::FileInfo, text: &str) {
     info.set_attribute_string(KIND, text);
 }
 
+/// The size, or 0 when GIO doesn't know it (a WebDAV folder, say).
 pub fn size(info: &gio::FileInfo) -> u64 {
+    if !info.has_attribute("standard::size") {
+        return 0;
+    }
     info.size().max(0) as u64
 }
 
@@ -170,6 +193,29 @@ pub fn fields<'a>(info: &gio::FileInfo, scratch: &'a mut (String, String)) -> Fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bundle_shows_as_its_application() {
+        let dir = std::env::temp_dir().join(format!("elavo-files-label-{}", std::process::id()));
+        let b = dir.join("notes-app.eapp");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("entry.json"), r#"{"name": "Notes"}"#).unwrap();
+        let info = gio::File::for_path(&b)
+            .query_info(
+                ATTRIBUTES,
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        info.set_attribute_object("standard::file", &gio::File::for_path(&b));
+        assert!(crate::eapp::decorate(&info, &|_| false));
+        // Bundle extensions start hidden, whatever Show all filename
+        // extensions says.
+        assert_eq!(label(&info), "Notes");
+        assert_eq!(title(&info), "Notes");
+        assert_eq!(info.name().to_str(), Some("notes-app.eapp"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_a_real_folder() {

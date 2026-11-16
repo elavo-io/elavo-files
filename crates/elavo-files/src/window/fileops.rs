@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use elavo_files_core::clipboard::Op;
 use elavo_files_core::ops::{display_name, Dest, Job, Kind, Outcome};
-use elavo_files_core::{archive, eapp, entry, naming, trash};
+use elavo_files_core::{archive, eapp, entry, naming, prefs, trash, typeselect};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 
@@ -185,6 +185,109 @@ impl Window {
         }
     }
 
+    /// One key of type-to-select. Whether it was taken.
+    fn type_select(
+        &self,
+        typed: &std::cell::RefCell<(String, Option<std::time::Instant>, String)>,
+        key: gdk::Key,
+        state: gdk::ModifierType,
+    ) -> bool {
+        if state.intersects(
+            gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::SUPER_MASK
+                | gdk::ModifierType::META_MASK
+                | gdk::ModifierType::HYPER_MASK,
+        ) {
+            return false;
+        }
+        let Some(c) = key.to_unicode().filter(|c| !c.is_control()) else {
+            return false;
+        };
+        if self.in_localsend() || self.stack.visible_child_name().is_some_and(|n| n == "message") {
+            return false;
+        }
+        // Only with the focus in a view, never in a text field.
+        let Some(focus) = gtk::prelude::RootExt::focus(&self.window) else {
+            return false;
+        };
+        if !focus.is_ancestor(&self.stack) {
+            return false;
+        }
+        let mut w = Some(focus);
+        while let Some(x) = w {
+            if x.is::<gtk::Editable>() || x.is::<gtk::Text>() {
+                return false;
+            }
+            w = x.parent();
+        }
+        let now = std::time::Instant::now();
+        let query = {
+            let mut t = typed.borrow_mut();
+            // A new folder (or column) starts a new name too.
+            let here = self.here().map(|f| f.uri().to_string()).unwrap_or_default();
+            if t.1.is_some_and(|last| now.duration_since(last) > typeselect::RESET)
+                || t.2 != here
+            {
+                t.0.clear();
+                t.2 = here;
+            }
+            // A space on its own is Quick Look.
+            if c == ' ' && t.0.is_empty() {
+                return false;
+            }
+            t.0.push(c);
+            t.1 = Some(now);
+            t.0.clone()
+        };
+        let view = self.view_kind();
+        let sel = self.sel_of(view);
+        // What each item shows, in the order shown.
+        let names: Vec<String> = (0..sel.n_items())
+            .map(|i| {
+                sel.item(i)
+                    .and_then(|o| views::info_of(&o))
+                    .map(|info| entry::label(&info))
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(pos) = typeselect::index(&names, &query) {
+            self.select_and_show(view, pos as u32);
+        }
+        true
+    }
+
+    /// Select only the item at `pos`, bring it into sight and put the
+    /// focus on it, so the arrow keys and Shift go on from there.
+    fn select_and_show(&self, view: View, pos: u32) {
+        let flags = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
+        match view {
+            View::Icons => self.grid.scroll_to(pos, flags, None),
+            View::List => self
+                .list
+                .scroll_to(pos, None::<&gtk::ColumnViewColumn>, flags, None),
+            View::Columns => self.columns.list().scroll_to(pos, flags, None),
+            View::Gallery => self.gallery.strip.scroll_to(pos, flags, None),
+        }
+    }
+
+    /// What Eject (Ctrl+E) ejects: the one selected item when it is the top
+    /// of a drive or share, or else the drive or share this folder is on.
+    pub(super) fn eject_target(&self) -> Option<gio::Mount> {
+        if let [(_, info)] = self.selected().as_slice() {
+            if let Some(m) = self
+                .file_of(info)
+                .and_then(|f| crate::mounts::ejectable_root(&f))
+            {
+                return Some(m);
+            }
+        }
+        if self.in_localsend() {
+            return None;
+        }
+        crate::mounts::ejectable(&gio::File::for_uri(self.history.borrow().current()))
+    }
+
     pub(super) fn in_trash(&self) -> bool {
         trash::is_trash_uri(self.history.borrow().current())
     }
@@ -308,6 +411,7 @@ impl Window {
             ("quick-look-close", self.quicklook.is_open()),
             ("extract", archives && !trash_view && writable),
             ("open-terminal", terminal_dir && !trash_view),
+            ("eject", self.eject_target().is_some()),
             (
                 "share",
                 any && !trash_view && crate::localsend::is_running() && {
@@ -354,7 +458,13 @@ impl Window {
             let (x, y) = (button.width() as f64 / 2.0, 0.0);
             w.update_actions();
             if pane && w.selected().is_empty() {
-                w.show_menu(&menus::background(w.in_trash()), button, x, y);
+                let eject = w.eject_target().map(|m| crate::sidebar::mount_label(&m));
+                w.show_menu(
+                    &menus::background(w.in_trash(), eject.as_deref()),
+                    button,
+                    x,
+                    y,
+                );
             } else {
                 w.show_menu(&w.items_menu(), button, x, y);
             }
@@ -434,6 +544,28 @@ impl Window {
             ));
         }
         self.stack.add_controller(look);
+
+        // Type-to-select: typing a name selects the item it starts, as in
+        // Finder. It listens above the views, so a space while a name is
+        // being typed joins the name rather than opening Quick Look.
+        let typed: Rc<std::cell::RefCell<(String, Option<std::time::Instant>, String)>> = Rc::default();
+        let keys = gtk::EventControllerKey::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        let weak = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let Some(w) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if w.type_select(&typed, key, state) {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        if let Some(above) = self.stack.parent() {
+            above.add_controller(keys);
+        }
 
         // Right-click or a long press on empty space; a click there clears
         // the selection. A finger clears it on a tap, when it lifts without
@@ -565,6 +697,25 @@ impl Window {
             self.window.add_action(&action);
         };
         add("open", Box::new(|w| w.open_selected()));
+        add(
+            "eject",
+            Box::new(|w| {
+                if let Some(m) = w.eject_target() {
+                    crate::mounts::eject(Some(w.window.upcast_ref()), &m);
+                }
+            }),
+        );
+        add(
+            "connect-server",
+            Box::new(|w| {
+                let weak = Rc::downgrade(w);
+                crate::connect::present(&w.window, move |f| {
+                    if let Some(w) = weak.upgrade() {
+                        w.go(f);
+                    }
+                });
+            }),
+        );
         add(
             "show-contents",
             Box::new(|w| {
@@ -715,7 +866,15 @@ impl Window {
         let first = selected.first().map(|(_, i)| i);
         let name = first.map(entry::name).unwrap_or_default();
         let ct = first.map(entry::content_type).unwrap_or_default();
+        let eject = match selected.as_slice() {
+            [(_, i)] => self
+                .file_of(i)
+                .and_then(|f| crate::mounts::ejectable_root(&f))
+                .map(|m| crate::sidebar::mount_label(&m)),
+            _ => None,
+        };
         menus::items(&menus::Selection {
+            eject: eject.as_deref(),
             count: selected.len(),
             first_name: &name,
             content_type: &ct,
@@ -734,7 +893,13 @@ impl Window {
 
     fn background_menu(&self, from: &gtk::Widget, x: f64, y: f64) {
         self.update_actions();
-        self.show_menu(&menus::background(self.in_trash()), from, x, y);
+        let eject = self.eject_target().map(|m| crate::sidebar::mount_label(&m));
+        self.show_menu(
+            &menus::background(self.in_trash(), eject.as_deref()),
+            from,
+            x,
+            y,
+        );
     }
 
     /// Menu key or Shift+F10: the menu for the selection, by its item.
@@ -1567,15 +1732,13 @@ impl Window {
         let Some(bounds) = target.compute_bounds(&self.content) else {
             return;
         };
-        // A copied bundle is renamed without its .eapp, which stays on.
-        let suffix = if eapp::is_marked(info) {
-            eapp::SUFFIX
+        // A bundle's .eapp stays on whether or not it is shown.
+        let bundle = eapp::is_marked(info);
+        let file_name = info.name().to_string_lossy().into_owned();
+        let name = if bundle {
+            eapp::rename_text(&file_name, prefs::show_bundle_extensions())
         } else {
-            ""
-        };
-        let name = match file.path() {
-            Some(p) if !suffix.is_empty() => eapp::plain_name(&p),
-            _ => entry::name(info),
+            entry::name(info)
         };
         let is_dir = entry::is_dir(info);
         let field = gtk::Entry::builder()
@@ -1616,11 +1779,12 @@ impl Window {
         field.connect_activate(move |field| {
             d.set(true);
             if let Some(w) = weak.upgrade() {
-                w.finish_rename(
-                    &file,
-                    &format!("{old}{suffix}"),
-                    &format!("{}{suffix}", field.text()),
-                );
+                let (old, new) = if bundle {
+                    (file_name.clone(), eapp::renamed(&field.text()))
+                } else {
+                    (old.clone(), field.text().to_string())
+                };
+                w.finish_rename(&file, &old, &new);
             }
             if let Some(p) = pop.upgrade() {
                 p.popdown();
@@ -1640,7 +1804,12 @@ impl Window {
             });
         }
         field.grab_focus();
-        field.select_region(0, naming::stem_chars(&name, is_dir) as i32);
+        let stem = if bundle {
+            eapp::rename_stem_chars(&name)
+        } else {
+            naming::stem_chars(&name, is_dir)
+        };
+        field.select_region(0, stem as i32);
         log(&format!("renaming {name}"));
     }
 
