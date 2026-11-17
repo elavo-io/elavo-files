@@ -1,6 +1,6 @@
 # Making Files the default file manager (draft)
 
-What the Elavo image needs so Files replaces Nautilus as the file manager.
+What the Elavo image needs so Files is its file manager, in place of Nautilus.
 `scripts/install` puts Files' own files in place; the two patches here are
 drafts for the other repositories and have not been applied there.
 
@@ -11,7 +11,7 @@ drafts for the other repositories and have not been applied there.
 | `/usr/bin/elavo-files` | the app |
 | `/usr/share/applications/io.elavo.Files.desktop` | `MimeType=inode/directory`, `DBusActivatable=true`, the New Window action |
 | `/usr/share/dbus-1/services/io.elavo.Files.service` | D-Bus starts Files for the desktop file (`--gapplication-service`) |
-| `/usr/share/dbus-1/services/org.freedesktop.FileManager1.service` | D-Bus starts Files for Show in Folder from other apps; same path as Nautilus' file, so it replaces it |
+| `/usr/share/dbus-1/services/org.freedesktop.FileManager1.service` | D-Bus starts Files for Show in Folder from other apps |
 | `/etc/xdg/autostart/io.elavo.Files.LocalSend.desktop` | the LocalSend receiver at login (`--localsend-daemon`) |
 
 Files is one instance per session (`io.elavo.Files`). A second
@@ -27,10 +27,9 @@ allows replacement.
 1. A `files` build stage, like the other Elavo apps: clone elavo-files,
    `cargo build --release --locked`, `DESTDIR=/out scripts/install`, and
    `COPY --from=files /out /files_files`.
-2. In `build.sh`, copy `/ctx/files_files` after the packages (so its
-   FileManager1 service file wins over Nautilus'), check the files, and add
-   `/usr/share/applications/elavo-mimeapps.list` with
-   `inode/directory=io.elavo.Files.desktop;org.gnome.Nautilus.desktop;`.
+2. In `build.sh`, copy `/ctx/files_files` after the packages, check the
+   files, and add `/usr/share/applications/elavo-mimeapps.list` with
+   `inode/directory=io.elavo.Files.desktop;`.
    GLib reads `<desktop>-mimeapps.list` for `XDG_CURRENT_DESKTOP=elavo`,
    ahead of the distribution's defaults. A person's own
    `~/.config/mimeapps.list` still wins.
@@ -39,17 +38,18 @@ allows replacement.
 4. Packages Files uses that the image lacks today: `gvfs-smb` (Windows/Samba
    shares and browsing them in Network), `gvfs-nfs`, `gvfs-afc` (iPhone),
    `gvfs-mtp` (Android), `gvfs-gphoto2` (cameras), `gvfs-archive`, and
-   `bsdtar` (an extract fallback). Already there: gvfs (dav, ftp, sftp,
-   network, dns-sd, wsdd, trash, recent, computer), gvfs-fuse, udisks2,
+   `bsdtar` (an extract fallback). Nautilus used to bring these, so the
+   image lists them itself: `localsearch` (search), `glycin-thumbnailer` and
+   `gst-thumbnailers` (thumbnails), and `gvfs-fuse`. Already there: gvfs
+   (dav, ftp, sftp, network, dns-sd, wsdd, trash, recent, computer), udisks2,
    glib-networking (LocalSend's TLS), openssl (LocalSend's certificate), zip,
    7zip, tar, the GStreamer plugins Quick Look plays video with, foot (Open
    in Terminal). Optional: `gvfs-afp` (old Apple file sharing), `gvfs-goa`.
-5. Nautilus stays installed for now, hidden from the launcher
-   (`NoDisplay=true`). Folio no longer uses it: the desktop's file
-   operations, Undo and Quick Look go to Files' own D-Bus interfaces in
-   place of Nautilus' `FileOperations2` and Sushi, and the panel's Files
-   menus drive Files windows. Only elavo-applications still ships a
-   Nautilus extension; Nautilus and Sushi can go once that is settled.
+5. Nautilus and Sushi are not installed. Folio's desktop sends its file
+   operations, Undo and Quick Look to Files' own D-Bus interfaces in place
+   of Nautilus' `FileOperations2` and Sushi, and the panel's Files menus
+   drive Files windows. elavo-applications still builds a Nautilus module;
+   with Nautilus gone nothing loads it.
 
 ## The dock (`elavo-folio-files-pin.patch`, for ~/GitHub/elavo-folio)
 

@@ -5,7 +5,7 @@
 # Files is the default file manager once installed: it is the
 # inode/directory handler in its desktop file, D-Bus starts it for
 # io.elavo.Files and org.freedesktop.FileManager1, and the LocalSend
-# receiver starts at login. The image makes it the default over Nautilus
+# receiver starts at login. The image makes it the only file manager
 # (see data/packaging/README.md).
 set -eu
 

@@ -38,9 +38,9 @@ file operations, Undo and Quick Look through Files over D-Bus
 - Elavo applications (`.eapp` bundles, from elavo-applications) show as
   the app, with its name and icon (in the previews too; Columns previews a
   bundle instead of opening it as a folder), and open the app on double-click or
-  Open; Show Package Contents opens the folder. As with the Nautilus
-  extension, installs in an Applications folder are never moved or copied:
-  dragged or pasted elsewhere they become shortcuts. Move to Trash refuses
+  Open; Show Package Contents opens the folder. Installs in an
+  Applications folder are never moved or copied: dragged or pasted
+  elsewhere they become shortcuts. Move to Trash refuses
   a running app, and in `/Applications` asks elavo-applications to
   uninstall. A copy outside an Applications folder opens through
   `elavo-applications-ctl open`.
