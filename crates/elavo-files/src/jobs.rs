@@ -70,6 +70,12 @@ pub struct Jobs {
     list: gtk::Box,
     entries: RefCell<Vec<Rc<Entry>>>,
     window: glib::WeakRef<gtk::ApplicationWindow>,
+    /// For operations with no Files window (from D-Bus): the list shows in
+    /// a small window of its own instead of the toolbar's popover.
+    detached: Option<gtk::Window>,
+    /// A name-conflict question is open: the detached window stays out of
+    /// its way until it is answered.
+    asking: Cell<bool>,
     /// Where focus goes when the button hides with focus in it.
     refocus: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -101,6 +107,17 @@ fn detail_text(p: &Progress) -> String {
 
 impl Jobs {
     pub fn new(window: &gtk::ApplicationWindow) -> Rc<Self> {
+        Self::build(Some(window))
+    }
+
+    /// Operations that belong to no Files window, such as the desktop's
+    /// copies and moves: once one takes more than a moment, the list shows
+    /// in a small window, which hides again when the last one ends.
+    pub fn detached() -> Rc<Self> {
+        Self::build(None)
+    }
+
+    fn build(window: Option<&gtk::ApplicationWindow>) -> Rc<Self> {
         let ring = gtk::DrawingArea::builder()
             .content_width(18)
             .content_height(18)
@@ -111,11 +128,27 @@ impl Jobs {
             .width_request(300)
             .css_classes(["files-jobs"])
             .build();
+        let detached = window.is_none().then(|| {
+            list.set_margin_top(16);
+            list.set_margin_bottom(16);
+            list.set_margin_start(16);
+            list.set_margin_end(16);
+            gtk::Window::builder()
+                .title(tr("File Operations"))
+                .resizable(false)
+                .hide_on_close(true)
+                .child(&list)
+                .build()
+        });
+        let popover = gtk::Popover::new();
+        if detached.is_none() {
+            popover.set_child(Some(&list));
+        }
         let button = gtk::MenuButton::builder()
             .child(&ring)
             .tooltip_text(tr("Operations in progress"))
             .valign(gtk::Align::Center)
-            .popover(&gtk::Popover::builder().child(&list).build())
+            .popover(&popover)
             .css_classes(["files-round"])
             .visible(false)
             .build();
@@ -125,8 +158,11 @@ impl Jobs {
             list,
             entries: RefCell::default(),
             refocus: RefCell::default(),
-            window: window.downgrade(),
+            window: glib::WeakRef::new(),
+            detached,
+            asking: Cell::new(false),
         });
+        this.window.set(window);
         let weak = Rc::downgrade(&this);
         this.ring.set_draw_func(move |area, cr, w, h| {
             let Some(jobs) = weak.upgrade() else {
@@ -181,8 +217,19 @@ impl Jobs {
     /// Show Progress Window: open the list of operations, when any run.
     pub fn show(&self) {
         if self.running() {
-            self.button.set_visible(true);
-            self.button.popup();
+            self.reveal();
+            if self.detached.is_none() {
+                self.button.popup();
+            }
+        }
+    }
+
+    /// Show that something runs: the toolbar ring, or the detached window.
+    fn reveal(&self) {
+        match &self.detached {
+            Some(window) if !self.asking.get() => window.present(),
+            Some(_) => {}
+            None => self.button.set_visible(true),
         }
     }
 
@@ -205,7 +252,7 @@ impl Jobs {
         glib::timeout_add_local_once(SHOW_AFTER, move || {
             if let (Some(jobs), Some(_)) = (weak.upgrade(), shown.upgrade()) {
                 if jobs.running() {
-                    jobs.button.set_visible(true);
+                    jobs.reveal();
                 }
             }
         });
@@ -213,9 +260,12 @@ impl Jobs {
         // Keep the app running until the operation ends, even with its
         // window closed.
         let hold = gio::Application::default().map(|a| a.hold());
+        // Undo and Redo wait for it, in every window and for the desktop.
+        let busy = crate::history::Busy::new();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let _hold = hold;
+            let _busy = busy;
             let mut done = Some(done);
             while let Some(event) = rx.next().await {
                 let Some(jobs) = weak.upgrade() else {
@@ -232,8 +282,23 @@ impl Jobs {
                         jobs.ring.queue_draw();
                     }
                     Event::Conflict(conflict, reply) => {
+                        // Over the window the operation belongs to. With no
+                        // window, the question stands alone: the detached
+                        // progress window steps aside until it is answered.
                         let parent = jobs.window.upgrade();
-                        let answer = dialogs::conflict(parent.as_ref(), &conflict).await;
+                        if let Some(window) = &jobs.detached {
+                            jobs.asking.set(true);
+                            window.set_visible(false);
+                        }
+                        let answer =
+                            dialogs::conflict(parent.as_ref().map(|w| w.upcast_ref()), &conflict)
+                                .await;
+                        if jobs.detached.is_some() {
+                            jobs.asking.set(false);
+                            if jobs.running() {
+                                jobs.reveal();
+                            }
+                        }
                         let _ = reply.send(answer);
                     }
                     Event::Done(outcome) => {
@@ -299,6 +364,12 @@ impl Jobs {
     fn remove_entry(&self, entry: &Rc<Entry>) {
         self.list.remove(&entry.row);
         self.entries.borrow_mut().retain(|e| !Rc::ptr_eq(e, entry));
+        if let Some(window) = &self.detached {
+            if !self.running() {
+                window.set_visible(false);
+            }
+            return;
+        }
         if !self.running() {
             let had_focus = self.button.popover().is_some_and(|p| p.is_visible())
                 || self.button.has_focus()

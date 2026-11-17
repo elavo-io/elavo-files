@@ -45,19 +45,19 @@ allows replacement.
    7zip, tar, the GStreamer plugins Quick Look plays video with, foot (Open
    in Terminal). Optional: `gvfs-afp` (old Apple file sharing), `gvfs-goa`.
 5. Nautilus stays installed for now, hidden from the launcher
-   (`NoDisplay=true`): Folio's desktop calls Nautilus' `FileOperations2`
-   and Sushi (`org.gnome.NautilusPreviewer`), the panel's Files menus drive
-   Nautilus windows, and elavo-applications ships a Nautilus extension.
-   Remove it once those move to Files.
+   (`NoDisplay=true`). Folio no longer uses it: the desktop's file
+   operations, Undo and Quick Look go to Files' own D-Bus interfaces in
+   place of Nautilus' `FileOperations2` and Sushi, and the panel's Files
+   menus drive Files windows. Only elavo-applications still ships a
+   Nautilus extension; Nautilus and Sushi can go once that is settled.
 
 ## The dock (`elavo-folio-files-pin.patch`, for ~/GitHub/elavo-folio)
 
 The dock's locked first pin becomes `io.elavo.Files.desktop`; a saved
 `org.gnome.Nautilus.desktop` pin turns into it, so people keep one Files
 icon. Files' windows have the app id `io.elavo.Files`, which matches it.
-Not built or tested in Folio. Still to do in Folio, not drafted: the
-panel's Files menus (`folio.rs` routes them to Nautilus) and the desktop's
-file operations and previews.
+Folio has since taken this in, and its panel menus and desktop file
+operations go to Files as well.
 
 ## Checking it on a running system
 

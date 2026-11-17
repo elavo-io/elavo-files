@@ -1,7 +1,8 @@
 //! What a window does to files: the context menus, Open and Open With,
 //! Move to Trash, Delete Immediately, Put Back and Empty Trash, Rename,
 //! Compress, Duplicate, Make Alias, the clipboard, drag and drop, and Undo
-//! for the last change. Long operations run through [`Jobs`] on a worker
+//! and Redo, through the history every window and the desktop share
+//! ([`crate::history`]). Long operations run through [`Jobs`] on a worker
 //! thread; quick ones (rename, alias, new folder) run here.
 
 use std::cell::Cell;
@@ -15,12 +16,13 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 
 use super::{log, Window};
+use crate::history::{self, Action, Busy};
 use crate::i18n::tr;
 use crate::state::Mode;
 use crate::views::{self, CellHandler, View};
 use crate::{bundles, clip, dialogs, info, menus, settings, sidebar, terminal};
 
-/// The last change, for Undo.
+/// A change, for Undo.
 pub enum Undo {
     /// `(where it is now, where it was)`.
     Moved(Vec<(gio::File, gio::File)>),
@@ -70,12 +72,12 @@ const VIEW_KEYS: &[(&str, &str)] = &[
     ("Menu|<Shift>F10", "win.context-menu"),
 ];
 
-fn quoted(name: &str) -> String {
+pub(crate) fn quoted(name: &str) -> String {
     format!("\u{201c}{name}\u{201d}")
 }
 
 /// `“Report.pdf”` or `3 items`, for titles and questions.
-fn what(files: &[gio::File]) -> String {
+pub(crate) fn what(files: &[gio::File]) -> String {
     match files {
         [one] => quoted(&display_name(one)),
         _ => format!("{} {}", files.len(), tr("items")),
@@ -84,7 +86,7 @@ fn what(files: &[gio::File]) -> String {
 
 /// An installed application bundle: Files never moves, duplicates or
 /// deletes one itself.
-fn is_install(file: &gio::File) -> bool {
+pub(crate) fn is_install(file: &gio::File) -> bool {
     file.path().is_some_and(|p| eapp::is_install(&p))
 }
 
@@ -369,11 +371,15 @@ impl Window {
             .collect()
     }
 
-    pub(super) fn set_undo(&self, undo: Undo) {
-        self.undo.replace(Some(undo));
-        // A new operation: what was undone before can't be redone.
-        self.redo.replace(None);
-        self.update_actions();
+    /// A new operation, on the history every window and the desktop share.
+    pub(super) fn set_undo(&self, action: Action, undo: Undo) {
+        history::record(action, undo);
+    }
+
+    /// Undo and Redo, as the shared history allows.
+    pub(super) fn sync_undo(&self) {
+        self.set_enabled("undo", history::can_undo());
+        self.set_enabled("redo", history::can_redo());
     }
 
     /// Enable what the selection, the place and the clipboard allow.
@@ -425,8 +431,8 @@ impl Window {
                         self.here().is_some_and(|f| f.path().is_some())
                     },
             ),
-            ("undo", self.undo.borrow().is_some() && !self.jobs.running()),
-            ("redo", self.redo.borrow().is_some() && !self.jobs.running()),
+            ("undo", history::can_undo()),
+            ("redo", history::can_redo()),
             ("show-progress", self.jobs.running()),
             ("get-info", any || self.here().is_some()),
             ("quick-look", any || self.quicklook.is_open()),
@@ -1094,16 +1100,19 @@ impl Window {
                     return;
                 }
                 let results = Self::results(&out);
-                w.set_undo(if moving {
-                    Undo::Moved(
-                        out.done
-                            .iter()
-                            .map(|(s, d)| (d.clone(), s.clone()))
-                            .collect(),
-                    )
-                } else {
-                    Undo::Created(results.clone())
-                });
+                w.set_undo(
+                    if moving { Action::Move } else { Action::Copy },
+                    if moving {
+                        Undo::Moved(
+                            out.done
+                                .iter()
+                                .map(|(s, d)| (d.clone(), s.clone()))
+                                .collect(),
+                        )
+                    } else {
+                        Undo::Created(results.clone())
+                    },
+                );
                 w.select_when_listed(&results, false);
             },
         );
@@ -1139,7 +1148,14 @@ impl Window {
     }
 
     fn trash_files(self: &Rc<Self>, files: Vec<gio::File>) {
-        if files.is_empty() || self.in_trash() {
+        self.trash_files_redoing(files, None);
+    }
+
+    /// Move to Trash; `redoing` while Redo does it again, so what is left
+    /// to redo stays.
+    fn trash_files_redoing(self: &Rc<Self>, files: Vec<gio::File>, redoing: Option<Busy>) {
+        // The selection in the Trash is already there; Redo's items aren't.
+        if files.is_empty() || (redoing.is_none() && self.in_trash()) {
             return;
         }
         let files = self.guard_installs(files);
@@ -1150,16 +1166,18 @@ impl Window {
         self.run(
             Job::new(Kind::Trash, files, Dest::Beside),
             title,
-            |w, out| {
+            move |w, out| {
                 dialogs::errors(
                     &w.window,
                     &tr("Some items couldn't be moved to the Trash."),
                     &out.errors,
                 );
                 if !out.done.is_empty() {
-                    w.set_undo(Undo::Trashed(
-                        out.done.iter().map(|(s, _)| s.clone()).collect(),
-                    ));
+                    let undo = Undo::Trashed(out.done.iter().map(|(s, _)| s.clone()).collect());
+                    match redoing {
+                        Some(_busy) => history::redone(Action::Trash, undo),
+                        None => w.set_undo(Action::Trash, undo),
+                    }
                 }
                 if !out.untrashable.is_empty() && !out.cancelled {
                     let message = match out.untrashable.as_slice() {
@@ -1242,8 +1260,8 @@ impl Window {
                         &tr("Some items couldn't be deleted."),
                         &out.errors,
                     );
-                    // Deleted for good: nothing to undo into.
-                    w.undo.replace(None);
+                    // Deleted for good: Undo can't go back past this.
+                    history::clear();
                 },
             );
         });
@@ -1292,7 +1310,7 @@ impl Window {
                     &out.errors,
                 );
                 if !out.done.is_empty() {
-                    w.set_undo(Undo::Created(Self::results(&out)));
+                    w.set_undo(Action::PutBack, Undo::Created(Self::results(&out)));
                 }
             },
         );
@@ -1323,8 +1341,7 @@ impl Window {
                             &tr("The Trash couldn't be emptied."),
                             &out.errors,
                         );
-                        w.undo.replace(None);
-                        w.redo.replace(None);
+                        history::clear();
                     },
                 );
             }
@@ -1356,7 +1373,7 @@ impl Window {
                 );
                 if !out.done.is_empty() {
                     let results = Self::results(&out);
-                    w.set_undo(Undo::Created(results.clone()));
+                    w.set_undo(Action::Extract, Undo::Created(results.clone()));
                     w.select_when_listed(&results, false);
                 }
             },
@@ -1463,7 +1480,7 @@ impl Window {
                 dialogs::errors(&w.window, &tr("Compress didn't finish."), &out.errors);
                 if !out.done.is_empty() {
                     let results = Self::results(&out);
-                    w.set_undo(Undo::Created(results.clone()));
+                    w.set_undo(Action::Compress, Undo::Created(results.clone()));
                     w.select_when_listed(&results, false);
                 }
             },
@@ -1487,7 +1504,7 @@ impl Window {
                 );
                 if !out.done.is_empty() {
                     let results = Self::results(&out);
-                    w.set_undo(Undo::Created(results.clone()));
+                    w.set_undo(Action::Duplicate, Undo::Created(results.clone()));
                     w.select_when_listed(&results, false);
                 }
             },
@@ -1513,7 +1530,7 @@ impl Window {
         }
         dialogs::errors(&self.window, &tr("Some aliases couldn't be made."), &errors);
         if !made.is_empty() {
-            self.set_undo(Undo::Created(made.clone()));
+            self.set_undo(Action::Alias, Undo::Created(made.clone()));
             self.select_when_listed(&made, false);
         }
     }
@@ -1543,12 +1560,12 @@ impl Window {
         });
     }
 
+    /// Undo the most recent operation, from any window or the desktop.
     fn undo(self: &Rc<Self>) {
-        let Some(undo) = self.undo.take() else {
+        let Some((action, undo, busy)) = history::take_undo() else {
             return;
         };
-        self.redo.replace(None);
-        self.update_actions();
+        let failed = tr("Undo didn't finish.");
         match undo {
             Undo::Moved(pairs) => {
                 let (now, was): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -1556,16 +1573,20 @@ impl Window {
                 self.run(
                     Job::new(Kind::Move, now, Dest::Exactly(was)),
                     title,
-                    |w, out| {
-                        dialogs::errors(&w.window, &tr("Undo didn't finish."), &out.errors);
+                    move |w, out| {
+                        let _busy = busy;
+                        dialogs::errors(&w.window, &failed, &out.errors);
                         w.select_when_listed(&Self::results(&out), false);
                         if !out.done.is_empty() {
-                            w.redo.replace(Some(Redo::Move(
-                                out.done
-                                    .iter()
-                                    .map(|(s, d)| (d.clone(), s.clone()))
-                                    .collect(),
-                            )));
+                            history::undone(
+                                action,
+                                Redo::Move(
+                                    out.done
+                                        .iter()
+                                        .map(|(s, d)| (d.clone(), s.clone()))
+                                        .collect(),
+                                ),
+                            );
                         }
                     },
                 );
@@ -1578,27 +1599,29 @@ impl Window {
                     glib::Priority::DEFAULT,
                     gio::Cancellable::NONE,
                     move |r| {
-                        let Some(w) = weak.upgrade() else {
-                            return;
-                        };
+                        let _busy = busy;
                         match r {
                             Ok(file) => {
-                                w.select_when_listed(std::slice::from_ref(&file), false);
-                                w.redo.replace(Some(Redo::Rename(file, name)));
-                                w.update_actions();
+                                if let Some(w) = weak.upgrade() {
+                                    w.select_when_listed(std::slice::from_ref(&file), false);
+                                }
+                                history::undone(action, Redo::Rename(file, name));
                             }
                             Err(e) => {
-                                dialogs::error(&w.window, &tr("Undo didn't finish."), e.message())
+                                if let Some(w) = weak.upgrade() {
+                                    dialogs::error(&w.window, &failed, e.message());
+                                }
                             }
                         }
                     },
                 );
             }
             Undo::Trashed(origs) => {
-                self.restore_to(origs, tr("Undo didn't finish."), |w, out| {
+                self.restore_to(origs, failed, move |_, out| {
+                    let _busy = busy;
                     let results = Self::results(&out);
                     if !results.is_empty() {
-                        w.redo.replace(Some(Redo::Trash(results)));
+                        history::undone(action, Redo::Trash(results));
                     }
                 });
             }
@@ -1607,12 +1630,14 @@ impl Window {
                 self.run(
                     Job::new(Kind::Trash, files, Dest::Beside),
                     title,
-                    |w, out| {
-                        dialogs::errors(&w.window, &tr("Undo didn't finish."), &out.errors);
+                    move |w, out| {
+                        let _busy = busy;
+                        dialogs::errors(&w.window, &failed, &out.errors);
                         if !out.done.is_empty() {
-                            w.redo.replace(Some(Redo::Restore(
-                                out.done.iter().map(|(s, _)| s.clone()).collect(),
-                            )));
+                            history::undone(
+                                action,
+                                Redo::Restore(out.done.iter().map(|(s, _)| s.clone()).collect()),
+                            );
                         }
                     },
                 );
@@ -1620,12 +1645,12 @@ impl Window {
         }
     }
 
-    /// Do again what Undo undid; Undo then undoes it once more.
+    /// Do again what Undo undid last; Undo then undoes it once more.
     fn redo(self: &Rc<Self>) {
-        let Some(redo) = self.redo.take() else {
+        let Some((action, redo, busy)) = history::take_redo() else {
             return;
         };
-        self.update_actions();
+        let failed = tr("Redo didn't finish.");
         match redo {
             Redo::Move(pairs) => {
                 let (now, to): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -1633,16 +1658,20 @@ impl Window {
                 self.run(
                     Job::new(Kind::Move, now, Dest::Exactly(to)),
                     title,
-                    |w, out| {
-                        dialogs::errors(&w.window, &tr("Redo didn't finish."), &out.errors);
+                    move |w, out| {
+                        let _busy = busy;
+                        dialogs::errors(&w.window, &failed, &out.errors);
                         w.select_when_listed(&Self::results(&out), false);
                         if !out.done.is_empty() {
-                            w.set_undo(Undo::Moved(
-                                out.done
-                                    .iter()
-                                    .map(|(s, d)| (d.clone(), s.clone()))
-                                    .collect(),
-                            ));
+                            history::redone(
+                                action,
+                                Undo::Moved(
+                                    out.done
+                                        .iter()
+                                        .map(|(s, d)| (d.clone(), s.clone()))
+                                        .collect(),
+                                ),
+                            );
                         }
                     },
                 );
@@ -1655,27 +1684,30 @@ impl Window {
                     glib::Priority::DEFAULT,
                     gio::Cancellable::NONE,
                     move |r| {
-                        let Some(w) = weak.upgrade() else {
-                            return;
-                        };
+                        let _busy = busy;
                         match r {
                             Ok(renamed) => {
-                                w.select_when_listed(std::slice::from_ref(&renamed), false);
-                                w.set_undo(Undo::Renamed(renamed, was));
+                                if let Some(w) = weak.upgrade() {
+                                    w.select_when_listed(std::slice::from_ref(&renamed), false);
+                                }
+                                history::redone(action, Undo::Renamed(renamed, was));
                             }
                             Err(e) => {
-                                dialogs::error(&w.window, &tr("Redo didn't finish."), e.message())
+                                if let Some(w) = weak.upgrade() {
+                                    dialogs::error(&w.window, &failed, e.message());
+                                }
                             }
                         }
                     },
                 );
             }
-            Redo::Trash(files) => self.trash_files(files),
+            Redo::Trash(files) => self.trash_files_redoing(files, Some(busy)),
             Redo::Restore(origs) => {
-                self.restore_to(origs, tr("Redo didn't finish."), |w, out| {
+                self.restore_to(origs, failed, move |_, out| {
+                    let _busy = busy;
                     let results = Self::results(&out);
                     if !results.is_empty() {
-                        w.set_undo(Undo::Created(results));
+                        history::redone(action, Undo::Created(results));
                     }
                 });
             }
@@ -1976,7 +2008,7 @@ impl Window {
                 match r {
                     Ok(renamed) => {
                         log(&format!("renamed to {}", renamed.uri()));
-                        w.set_undo(Undo::Renamed(renamed.clone(), old));
+                        w.set_undo(Action::Rename, Undo::Renamed(renamed.clone(), old));
                         w.select_when_listed(&[renamed], false);
                     }
                     Err(e) => dialogs::error(

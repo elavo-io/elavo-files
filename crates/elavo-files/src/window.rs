@@ -5,7 +5,7 @@
 //! disk as they happen. File operations, the context menus, the clipboard,
 //! drag and drop, Rename and Undo are in `fileops.rs`.
 
-mod fileops;
+pub(crate) mod fileops;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -89,8 +89,6 @@ pub struct Window {
     /// The trash bar and the views, which popovers are parented to.
     content: gtk::Box,
     trash_bar: gtk::Revealer,
-    undo: RefCell<Option<fileops::Undo>>,
-    redo: RefCell<Option<fileops::Redo>>,
     pending: RefCell<fileops::Pending>,
     menu: RefCell<Option<gtk::PopoverMenu>>,
     /// The location last mounted on the way to it, so a failed mount
@@ -115,8 +113,7 @@ fn pill() -> gtk::Box {
 
 fn more_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    let undo = gio::Menu::new();
-    undo.append(Some(&tr("Undo")), Some("win.undo"));
+    let undo = crate::history::labelled(&[(crate::history::Step::Undo, "win.undo", None)]);
     menu.append_section(None, &undo);
     let first = gio::Menu::new();
     first.append(Some(&tr("New Folder")), Some("win.new-folder"));
@@ -606,8 +603,6 @@ impl Window {
             jobs,
             content,
             trash_bar,
-            undo: RefCell::default(),
-            redo: RefCell::default(),
             pending: RefCell::default(),
             menu: RefCell::default(),
             mount_tried: RefCell::default(),
@@ -623,6 +618,15 @@ impl Window {
             if let Some(w) = weak.upgrade() {
                 w.focus_view();
             }
+        });
+        // Undo and Redo follow the history every window shares.
+        let weak = Rc::downgrade(&this);
+        crate::history::watch(move || {
+            let Some(w) = weak.upgrade() else {
+                return false;
+            };
+            w.sync_undo();
+            true
         });
         this.connect();
         this.add_actions();
@@ -1389,7 +1393,10 @@ impl Window {
                 };
                 match result {
                     Ok(()) => {
-                        w.set_undo(fileops::Undo::Created(vec![made.clone()]));
+                        w.set_undo(
+                            crate::history::Action::NewFolder,
+                            fileops::Undo::Created(vec![made.clone()]),
+                        );
                         // Finder names a new folder right away.
                         w.select_when_listed(&[made], true);
                     }

@@ -154,9 +154,18 @@ pub fn build() -> gio::Menu {
     bar.append_submenu(Some(&tr("File")), &file);
 
     let edit = menu(&[
-        section(&[
-            item(&tr("Undo"), "app.win-undo", Some("<Control>z")),
-            item(&tr("Redo"), "app.win-redo", Some("<Control><Shift>z")),
+        // “Undo Move to Trash”: the labels follow the shared history.
+        crate::history::labelled(&[
+            (
+                crate::history::Step::Undo,
+                "app.win-undo",
+                Some("<Control>z"),
+            ),
+            (
+                crate::history::Step::Redo,
+                "app.win-redo",
+                Some("<Control><Shift>z"),
+            ),
         ]),
         section(&[
             item(&tr("Cut"), "app.win-cut", Some("<Control>x")),

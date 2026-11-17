@@ -320,11 +320,57 @@ thread_local! {
     static DAEMON_HOLD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
 }
 
+mod imp {
+    use gtk::subclass::prelude::*;
+    use gtk::{gio, glib};
+
+    #[derive(Default)]
+    pub struct FilesApp;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for FilesApp {
+        const NAME: &'static str = "ElavoFilesApplication";
+        type Type = super::FilesApp;
+        type ParentType = gtk::Application;
+    }
+
+    impl ObjectImpl for FilesApp {}
+
+    impl ApplicationImpl for FilesApp {
+        /// Files' own objects (`crate::service`) go up before Files owns
+        /// its name, so a call D-Bus started Files for finds them.
+        fn dbus_register(
+            &self,
+            connection: &gio::DBusConnection,
+            object_path: &str,
+        ) -> Result<(), glib::Error> {
+            self.parent_dbus_register(connection, object_path)?;
+            crate::service::register(connection);
+            Ok(())
+        }
+
+        fn dbus_unregister(&self, connection: &gio::DBusConnection, object_path: &str) {
+            crate::service::unregister(connection);
+            self.parent_dbus_unregister(connection, object_path);
+        }
+    }
+
+    impl GtkApplicationImpl for FilesApp {}
+}
+
+glib::wrapper! {
+    /// `gtk::Application`, with Files' D-Bus objects registered with it.
+    pub struct FilesApp(ObjectSubclass<imp::FilesApp>)
+        @extends gtk::Application, gio::Application,
+        @implements gio::ActionGroup, gio::ActionMap;
+}
+
 pub fn run() -> glib::ExitCode {
-    let app = gtk::Application::builder()
-        .application_id(crate::APP_ID)
-        .flags(gio::ApplicationFlags::HANDLES_OPEN)
-        .build();
+    let app: gtk::Application = glib::Object::builder::<FilesApp>()
+        .property("application-id", crate::APP_ID)
+        .property("flags", gio::ApplicationFlags::HANDLES_OPEN)
+        .build()
+        .upcast();
     app.add_main_option(
         "localsend-daemon",
         glib::Char::from(0),

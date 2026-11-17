@@ -4,8 +4,9 @@ A Finder-style file manager for Elavo OS, written in Rust with GTK 4.
 
 Phases 1 to 3 are in: the window, the sidebar, the Icons, List, Columns,
 and Gallery views, file operations, previews, and thumbnails.
-Nautilus is still the default file manager on Elavo; installing or running
-Elavo Files does not change that.
+Elavo Files is the file manager on Elavo, and Folio's desktop runs its
+file operations, Undo and Quick Look through Files over D-Bus
+(`io.elavo.Files.FileOperations`, `io.elavo.Files.Previewer`).
 
 ## What works
 

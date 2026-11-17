@@ -2,7 +2,7 @@
 //!
 //! ```ini
 //! [General]
-//! NewWindowFolder=home    # home, recents, applications, desktop, documents or downloads
+//! NewWindowFolder=recents # recents, home, applications, desktop, documents or downloads
 //! FoldersFirst=false      # keep folders on top when sorting by name
 //! [Sidebar]
 //! Recents=true
@@ -57,7 +57,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            new_window_folder: "home".to_owned(),
+            new_window_folder: "recents".to_owned(),
             folders_first: false,
             show_recents: true,
             show_home: true,
@@ -215,13 +215,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_folder_falls_back_to_home() {
+    fn unknown_folder_falls_back_to_recents() {
         let f = glib::KeyFile::new();
         f.load_from_data(
             "[General]\nNewWindowFolder=/etc\n",
             glib::KeyFileFlags::NONE,
         )
         .unwrap();
-        assert_eq!(Prefs::from_keyfile(&f).new_window_folder, "home");
+        assert_eq!(Prefs::from_keyfile(&f).new_window_folder, "recents");
     }
 }

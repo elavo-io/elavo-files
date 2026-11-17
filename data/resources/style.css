@@ -811,3 +811,8 @@ window.files-connect > decoration { border-radius: 16px; }
   background-color: transparent;
   border-radius: 0;
 }
+
+/* Quick Look for the desktop, in a window of its own: only the panel shows. */
+window.files-quicklook-window {
+  background: transparent;
+}

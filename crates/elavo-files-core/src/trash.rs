@@ -114,38 +114,46 @@ pub fn forget(file: &gio::File, trash: &Path) {
     }
 }
 
-/// The most recently trashed item that came from `orig`, for Undo.
+/// The most recently trashed item that came from `orig`, for Undo. GVfs
+/// lists a new item in `trash:///` a moment after it arrives, so an Undo
+/// straight after Move to Trash also looks in the home trash itself.
 pub fn find(orig: &Path, trash: &Path) -> Option<gio::File> {
     if gvfs() {
-        let root = gio::File::for_uri(URI);
-        let children = root
-            .enumerate_children(
-                "standard::name,trash::orig-path,trash::deletion-date",
-                gio::FileQueryInfoFlags::NONE,
-                gio::Cancellable::NONE,
-            )
-            .ok()?;
-        let mut best: Option<(String, gio::FileInfo)> = None;
-        for info in children.flatten() {
-            let from = info.attribute_byte_string("trash::orig-path");
-            if from.as_deref().map(Path::new) != Some(orig) {
-                continue;
-            }
-            let date = info
-                .attribute_string("trash::deletion-date")
-                .map(|d| d.to_string())
-                .unwrap_or_default();
-            if best.as_ref().is_none_or(|(d, _)| date > *d) {
-                best = Some((date, info));
-            }
+        if let Some(found) = find_gvfs(orig) {
+            return Some(found);
         }
-        return best.map(|(_, info)| root.child(info.name()));
     }
     local_items(trash)
         .into_iter()
         .filter(|(_, info)| info.orig == orig)
         .max_by(|a, b| a.1.deleted.cmp(&b.1.deleted))
         .map(|(name, _)| gio::File::for_path(trash.join("files").join(name)))
+}
+
+fn find_gvfs(orig: &Path) -> Option<gio::File> {
+    let root = gio::File::for_uri(URI);
+    let children = root
+        .enumerate_children(
+            "standard::name,trash::orig-path,trash::deletion-date",
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    let mut best: Option<(String, gio::FileInfo)> = None;
+    for info in children.flatten() {
+        let from = info.attribute_byte_string("trash::orig-path");
+        if from.as_deref().map(Path::new) != Some(orig) {
+            continue;
+        }
+        let date = info
+            .attribute_string("trash::deletion-date")
+            .map(|d| d.to_string())
+            .unwrap_or_default();
+        if best.as_ref().is_none_or(|(d, _)| date > *d) {
+            best = Some((date, info));
+        }
+    }
+    best.map(|(_, info)| root.child(info.name()))
 }
 
 /// Everything in the Trash, top level only.

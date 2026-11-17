@@ -19,7 +19,7 @@ fn describe(s: &Stat) -> String {
 }
 
 /// Ask what to do when `conflict.name` is taken. Closing the dialog stops.
-pub async fn conflict(parent: Option<&gtk::ApplicationWindow>, c: &Conflict) -> Answer {
+pub async fn conflict(parent: Option<&gtk::Window>, c: &Conflict) -> Answer {
     let (tx, rx) = futures_channel::oneshot::channel::<Answer>();
     let tx = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
 
