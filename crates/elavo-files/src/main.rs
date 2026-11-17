@@ -16,10 +16,12 @@ mod connect;
 mod dialogs;
 mod filemanager1;
 mod gallery;
+mod gotofolder;
 mod i18n;
 mod info;
 mod jobs;
 mod localsend;
+mod menubar;
 mod menus;
 mod mounts;
 mod preview;
@@ -27,6 +29,7 @@ mod quicklook;
 mod rubberband;
 mod search;
 mod settings;
+mod shortcuts;
 mod sidebar;
 mod state;
 mod terminal;
@@ -41,6 +44,10 @@ pub const APP_ID: &str = "io.elavo.Files";
 
 fn main() -> glib::ExitCode {
     i18n::init();
+    // Dialogs that aren't the application's windows take their Wayland
+    // app_id from the program name: Folio's panel then shows Files' menus
+    // over them too, and the dock groups them with Files.
+    glib::set_prgname(Some(APP_ID));
     gtk::gio::resources_register_include!("elavo-files.gresource").expect("compiled resources");
     app::run()
 }

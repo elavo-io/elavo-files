@@ -40,7 +40,76 @@ fn open_window_for(
     }
     w.window.present();
     WINDOWS.with(|all| all.borrow_mut().push(w.clone()));
+    crate::menubar::sync(app);
     w
+}
+
+/// The Files window focused last, for the menu bar's application actions.
+fn focused_window(app: &gtk::Application) -> Option<Rc<Window>> {
+    let target = crate::menubar::target(app)?;
+    WINDOWS.with(|all| all.borrow().iter().find(|w| w.window == target).cloned())
+}
+
+/// Folio's Empty Trash: asks over the Files window focused last, or over
+/// a new Trash window when none is open.
+fn empty_trash(app: &gtk::Application) {
+    let w = focused_window(app).unwrap_or_else(|| {
+        open_window(
+            app,
+            Some(gio::File::for_uri(&elavo_files_core::places::trash().uri)),
+        )
+    });
+    w.empty_trash();
+}
+
+/// Actions for the menu bar that are about the application or its windows
+/// as a whole.
+fn add_menu_actions(app: &gtk::Application) {
+    let add = |name: &str, f: fn(&gtk::Application)| {
+        let action = gio::SimpleAction::new(name, None);
+        let a = app.downgrade();
+        action.connect_activate(move |_, _| {
+            if let Some(app) = a.upgrade() {
+                f(&app);
+            }
+        });
+        app.add_action(&action);
+    };
+    add("empty-trash", empty_trash);
+    add("shortcuts", |app| {
+        crate::shortcuts::present(app, crate::menubar::target(app).as_ref())
+    });
+    add("minimize", |app| {
+        if let Some(w) = crate::menubar::target(app) {
+            w.minimize();
+        }
+    });
+    add("zoom", |app| {
+        if let Some(w) = crate::menubar::target(app) {
+            if w.is_maximized() {
+                w.unmaximize();
+            } else {
+                w.maximize();
+            }
+        }
+    });
+    add("cycle-windows", |app| {
+        // Focus order: the focused window first, so the last one is the
+        // one not seen for longest.
+        let windows = crate::menubar::files_windows(app);
+        if windows.len() >= 2 {
+            if let Some(w) = windows.last() {
+                w.present();
+            }
+        }
+    });
+    add("bring-all-to-front", |app| {
+        let windows = crate::menubar::files_windows(app);
+        // The focused one last, so it stays on top.
+        for w in windows.iter().rev() {
+            w.present();
+        }
+    });
 }
 
 /// Whether `file` opens as a folder: a directory, a place that has to be
@@ -211,7 +280,7 @@ fn follow_color_scheme() {
     std::mem::forget(iface);
 }
 
-const ACCELS: &[(&str, &[&str])] = &[
+pub(crate) const ACCELS: &[(&str, &[&str])] = &[
     ("app.new-window", &["<Control>n"]),
     ("win.close", &["<Control>w"]),
     ("win.back", &["<Alt>Left", "<Control>bracketleft"]),
@@ -239,6 +308,10 @@ const ACCELS: &[(&str, &[&str])] = &[
     ("app.settings", &["<Control>comma"]),
     ("win.connect-server", &["<Control>k"]),
     ("win.eject", &["<Control>e"]),
+    ("win.show-sidebar", &["<Control><Alt>s"]),
+    ("win.go-to-folder", &["<Control><Shift>g"]),
+    ("win.fullscreen", &["F11"]),
+    ("app.shortcuts", &["<Control>question"]),
 ];
 
 thread_local! {
@@ -302,6 +375,9 @@ pub fn run() -> glib::ExitCode {
             crate::settings::present_tab(parent.as_ref(), "localsend");
         });
         app.add_action(&ls_settings);
+        add_menu_actions(app);
+        crate::menubar::install(app, |app, folder| open_window(app, folder).window.clone());
+        app.set_menubar(Some(&crate::menubar::build()));
         crate::settings::get();
         follow_settings();
         follow_unmounts();

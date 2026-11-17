@@ -31,6 +31,17 @@ pub enum Undo {
     Created(Vec<gio::File>),
 }
 
+/// What Redo does after an Undo: the undone operation again.
+pub enum Redo {
+    /// `(where it is now, where it goes)`.
+    Move(Vec<(gio::File, gio::File)>),
+    /// The item, and the name it gets again.
+    Rename(gio::File, String),
+    Trash(Vec<gio::File>),
+    /// Original locations of what Undo moved to the Trash.
+    Restore(Vec<gio::File>),
+}
+
 /// Items to select once the folder lists them, after an operation.
 #[derive(Default)]
 pub struct Pending {
@@ -54,6 +65,7 @@ const VIEW_KEYS: &[(&str, &str)] = &[
     ("<Control>d", "win.duplicate"),
     ("<Control>a", "win.select-all"),
     ("<Control>z", "win.undo"),
+    ("<Control><Shift>z", "win.redo"),
     ("<Control>o|<Control>Down", "win.open"),
     ("Menu|<Shift>F10", "win.context-menu"),
 ];
@@ -204,7 +216,12 @@ impl Window {
         let Some(c) = key.to_unicode().filter(|c| !c.is_control()) else {
             return false;
         };
-        if self.in_localsend() || self.stack.visible_child_name().is_some_and(|n| n == "message") {
+        if self.in_localsend()
+            || self
+                .stack
+                .visible_child_name()
+                .is_some_and(|n| n == "message")
+        {
             return false;
         }
         // Only with the focus in a view, never in a text field.
@@ -226,7 +243,8 @@ impl Window {
             let mut t = typed.borrow_mut();
             // A new folder (or column) starts a new name too.
             let here = self.here().map(|f| f.uri().to_string()).unwrap_or_default();
-            if t.1.is_some_and(|last| now.duration_since(last) > typeselect::RESET)
+            if t.1
+                .is_some_and(|last| now.duration_since(last) > typeselect::RESET)
                 || t.2 != here
             {
                 t.0.clear();
@@ -353,6 +371,8 @@ impl Window {
 
     pub(super) fn set_undo(&self, undo: Undo) {
         self.undo.replace(Some(undo));
+        // A new operation: what was undone before can't be redone.
+        self.redo.replace(None);
         self.update_actions();
     }
 
@@ -406,6 +426,8 @@ impl Window {
                     },
             ),
             ("undo", self.undo.borrow().is_some() && !self.jobs.running()),
+            ("redo", self.redo.borrow().is_some() && !self.jobs.running()),
+            ("show-progress", self.jobs.running()),
             ("get-info", any || self.here().is_some()),
             ("quick-look", any || self.quicklook.is_open()),
             ("quick-look-close", self.quicklook.is_open()),
@@ -548,7 +570,8 @@ impl Window {
         // Type-to-select: typing a name selects the item it starts, as in
         // Finder. It listens above the views, so a space while a name is
         // being typed joins the name rather than opening Quick Look.
-        let typed: Rc<std::cell::RefCell<(String, Option<std::time::Instant>, String)>> = Rc::default();
+        let typed: Rc<std::cell::RefCell<(String, Option<std::time::Instant>, String)>> =
+            Rc::default();
         let keys = gtk::EventControllerKey::builder()
             .propagation_phase(gtk::PropagationPhase::Capture)
             .build();
@@ -762,6 +785,7 @@ impl Window {
             }),
         );
         add("undo", Box::new(|w| w.undo()));
+        add("redo", Box::new(|w| w.redo()));
         add("context-menu", Box::new(|w| w.keyboard_menu()));
         add(
             "add-to-sidebar",
@@ -1274,7 +1298,7 @@ impl Window {
         );
     }
 
-    fn empty_trash(self: &Rc<Self>) {
+    pub(crate) fn empty_trash(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let Some(w) = weak.upgrade() else {
@@ -1300,6 +1324,7 @@ impl Window {
                             &out.errors,
                         );
                         w.undo.replace(None);
+                        w.redo.replace(None);
                     },
                 );
             }
@@ -1522,6 +1547,7 @@ impl Window {
         let Some(undo) = self.undo.take() else {
             return;
         };
+        self.redo.replace(None);
         self.update_actions();
         match undo {
             Undo::Moved(pairs) => {
@@ -1533,10 +1559,19 @@ impl Window {
                     |w, out| {
                         dialogs::errors(&w.window, &tr("Undo didn't finish."), &out.errors);
                         w.select_when_listed(&Self::results(&out), false);
+                        if !out.done.is_empty() {
+                            w.redo.replace(Some(Redo::Move(
+                                out.done
+                                    .iter()
+                                    .map(|(s, d)| (d.clone(), s.clone()))
+                                    .collect(),
+                            )));
+                        }
                     },
                 );
             }
             Undo::Renamed(now, was) => {
+                let name = display_name(&now);
                 let weak = Rc::downgrade(self);
                 now.set_display_name_async(
                     &was,
@@ -1547,7 +1582,11 @@ impl Window {
                             return;
                         };
                         match r {
-                            Ok(file) => w.select_when_listed(&[file], false),
+                            Ok(file) => {
+                                w.select_when_listed(std::slice::from_ref(&file), false);
+                                w.redo.replace(Some(Redo::Rename(file, name)));
+                                w.update_actions();
+                            }
                             Err(e) => {
                                 dialogs::error(&w.window, &tr("Undo didn't finish."), e.message())
                             }
@@ -1556,31 +1595,12 @@ impl Window {
                 );
             }
             Undo::Trashed(origs) => {
-                let home = trash::home();
-                let (mut items, mut targets) = (Vec::new(), Vec::new());
-                for orig in origs {
-                    if let Some(item) = orig.path().and_then(|p| trash::find(&p, &home)) {
-                        items.push(item);
-                        targets.push(orig);
+                self.restore_to(origs, tr("Undo didn't finish."), |w, out| {
+                    let results = Self::results(&out);
+                    if !results.is_empty() {
+                        w.redo.replace(Some(Redo::Trash(results)));
                     }
-                }
-                if items.is_empty() {
-                    dialogs::error(
-                        &self.window,
-                        &tr("Undo didn't finish."),
-                        &tr("The items are no longer in the Trash."),
-                    );
-                    return;
-                }
-                let title = format!("{} {}", tr("Putting back"), what(&targets));
-                self.run(
-                    Job::new(Kind::Restore, items, Dest::Exactly(targets)),
-                    title,
-                    |w, out| {
-                        dialogs::errors(&w.window, &tr("Undo didn't finish."), &out.errors);
-                        w.select_when_listed(&Self::results(&out), false);
-                    },
-                );
+                });
             }
             Undo::Created(files) => {
                 let title = format!("{} {} {}", tr("Moving"), what(&files), tr("to the Trash"));
@@ -1589,10 +1609,112 @@ impl Window {
                     title,
                     |w, out| {
                         dialogs::errors(&w.window, &tr("Undo didn't finish."), &out.errors);
+                        if !out.done.is_empty() {
+                            w.redo.replace(Some(Redo::Restore(
+                                out.done.iter().map(|(s, _)| s.clone()).collect(),
+                            )));
+                        }
                     },
                 );
             }
         }
+    }
+
+    /// Do again what Undo undid; Undo then undoes it once more.
+    fn redo(self: &Rc<Self>) {
+        let Some(redo) = self.redo.take() else {
+            return;
+        };
+        self.update_actions();
+        match redo {
+            Redo::Move(pairs) => {
+                let (now, to): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+                let title = format!("{} {}", tr("Moving"), what(&now));
+                self.run(
+                    Job::new(Kind::Move, now, Dest::Exactly(to)),
+                    title,
+                    |w, out| {
+                        dialogs::errors(&w.window, &tr("Redo didn't finish."), &out.errors);
+                        w.select_when_listed(&Self::results(&out), false);
+                        if !out.done.is_empty() {
+                            w.set_undo(Undo::Moved(
+                                out.done
+                                    .iter()
+                                    .map(|(s, d)| (d.clone(), s.clone()))
+                                    .collect(),
+                            ));
+                        }
+                    },
+                );
+            }
+            Redo::Rename(file, name) => {
+                let was = display_name(&file);
+                let weak = Rc::downgrade(self);
+                file.set_display_name_async(
+                    &name,
+                    glib::Priority::DEFAULT,
+                    gio::Cancellable::NONE,
+                    move |r| {
+                        let Some(w) = weak.upgrade() else {
+                            return;
+                        };
+                        match r {
+                            Ok(renamed) => {
+                                w.select_when_listed(std::slice::from_ref(&renamed), false);
+                                w.set_undo(Undo::Renamed(renamed, was));
+                            }
+                            Err(e) => {
+                                dialogs::error(&w.window, &tr("Redo didn't finish."), e.message())
+                            }
+                        }
+                    },
+                );
+            }
+            Redo::Trash(files) => self.trash_files(files),
+            Redo::Restore(origs) => {
+                self.restore_to(origs, tr("Redo didn't finish."), |w, out| {
+                    let results = Self::results(&out);
+                    if !results.is_empty() {
+                        w.set_undo(Undo::Created(results));
+                    }
+                });
+            }
+        }
+    }
+
+    /// Move items from the Trash back to `origs`, where they were.
+    fn restore_to(
+        self: &Rc<Self>,
+        origs: Vec<gio::File>,
+        failed: String,
+        then: impl FnOnce(&Rc<Self>, Outcome) + 'static,
+    ) {
+        let home = trash::home();
+        let (mut items, mut targets) = (Vec::new(), Vec::new());
+        for orig in origs {
+            if let Some(item) = orig.path().and_then(|p| trash::find(&p, &home)) {
+                items.push(item);
+                targets.push(orig);
+            }
+        }
+        if items.is_empty() {
+            dialogs::error(
+                &self.window,
+                &failed,
+                &tr("The items are no longer in the Trash."),
+            );
+            return;
+        }
+        let title = format!("{} {}", tr("Putting back"), what(&targets));
+        self.run(
+            Job::new(Kind::Restore, items, Dest::Exactly(targets)),
+            title,
+            move |w, out| {
+                dialogs::errors(&w.window, &failed, &out.errors);
+                w.select_when_listed(&Self::results(&out), false);
+                then(w, out);
+            },
+        );
     }
 
     // Selecting new items, and Rename

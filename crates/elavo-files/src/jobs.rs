@@ -178,6 +178,14 @@ impl Jobs {
         !self.entries.borrow().is_empty()
     }
 
+    /// Show Progress Window: open the list of operations, when any run.
+    pub fn show(&self) {
+        if self.running() {
+            self.button.set_visible(true);
+            self.button.popup();
+        }
+    }
+
     /// Run `job` on a worker thread; `done` gets its outcome on the main
     /// thread.
     pub fn start(self: &Rc<Self>, job: Job, title: String, done: impl FnOnce(Outcome) + 'static) {

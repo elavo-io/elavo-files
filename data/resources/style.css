@@ -805,3 +805,9 @@ window.files-connect > decoration { border-radius: 16px; }
 .files-connect-recent row:selected { background-color: alpha(currentColor, 0.12); color: @theme_fg_color; }
 .files-connect-kind { font-size: 0.85em; }
 .files-connect button.files-connect-remove { min-width: 24px; min-height: 24px; padding: 0; }
+
+/* View > Show Sidebar off: the window buttons sit in the title bar. */
+.files-sidebar-band.files-no-sidebar {
+  background-color: transparent;
+  border-radius: 0;
+}

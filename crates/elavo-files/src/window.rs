@@ -39,6 +39,12 @@ type Handler = Box<dyn Fn(&Rc<Window>)>;
 pub struct Window {
     pub window: gtk::ApplicationWindow,
     sidebar: Rc<Sidebar>,
+    /// The window buttons over the sidebar, and the lines beside the
+    /// sidebar in the title bar and the body, for Show Sidebar.
+    band: gtk::Box,
+    chrome_sep: gtk::Separator,
+    body_sep: gtk::Separator,
+    sidebar_width: gtk::SizeGroup,
     dir: gtk::DirectoryList,
     filter: gtk::CustomFilter,
     grid: gtk::GridView,
@@ -84,6 +90,7 @@ pub struct Window {
     content: gtk::Box,
     trash_bar: gtk::Revealer,
     undo: RefCell<Option<fileops::Undo>>,
+    redo: RefCell<Option<fileops::Redo>>,
     pending: RefCell<fileops::Pending>,
     menu: RefCell<Option<gtk::PopoverMenu>>,
     /// The location last mounted on the way to it, so a failed mount
@@ -309,7 +316,8 @@ impl Window {
 
         let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         chrome.append(&band);
-        chrome.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let chrome_sep = gtk::Separator::new(gtk::Orientation::Vertical);
+        chrome.append(&chrome_sep);
         chrome.append(&toolbar);
         window.set_titlebar(Some(&gtk::WindowHandle::builder().child(&chrome).build()));
 
@@ -548,13 +556,18 @@ impl Window {
 
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&sidebar.widget);
-        body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let body_sep = gtk::Separator::new(gtk::Orientation::Vertical);
+        body.append(&body_sep);
         body.append(&content);
         window.set_child(Some(&body));
 
         let this = Rc::new(Self {
             window,
             sidebar,
+            band,
+            chrome_sep,
+            body_sep,
+            sidebar_width: columns.clone(),
             dir,
             filter,
             grid,
@@ -594,6 +607,7 @@ impl Window {
             content,
             trash_bar,
             undo: RefCell::default(),
+            redo: RefCell::default(),
             pending: RefCell::default(),
             menu: RefCell::default(),
             mount_tried: RefCell::default(),
@@ -739,6 +753,32 @@ impl Window {
             Box::new(|w| w.go(gio::File::for_path(glib::home_dir()))),
         );
         add("close", Box::new(|w| w.window.close()));
+        add(
+            "fullscreen",
+            Box::new(|w| {
+                if w.window.is_fullscreen() {
+                    w.window.unfullscreen();
+                } else {
+                    w.window.fullscreen();
+                }
+            }),
+        );
+        add(
+            "go-to-folder",
+            Box::new(|w| {
+                let weak = Rc::downgrade(w);
+                let here = gio::File::for_uri(w.history.borrow().current());
+                crate::gotofolder::present(&w.window, here, move |folder, items| {
+                    if let Some(w) = weak.upgrade() {
+                        w.go(folder);
+                        if !items.is_empty() {
+                            w.show_items(&items);
+                        }
+                    }
+                });
+            }),
+        );
+        add("show-progress", Box::new(|w| w.jobs.show()));
         add("reload", Box::new(|w| w.reload()));
         add("new-folder", Box::new(|w| w.new_folder()));
         add("zoom-in", Box::new(|w| w.zoom(Some(true))));
@@ -807,6 +847,47 @@ impl Window {
             w.show_pane();
         });
         self.window.add_action(&preview);
+
+        let sidebar = gio::SimpleAction::new_stateful("show-sidebar", None, &true.to_variant());
+        let weak = Rc::downgrade(self);
+        sidebar.connect_activate(move |action, _| {
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let on = !action.state().and_then(|v| v.get::<bool>()).unwrap_or(true);
+            action.set_state(&on.to_variant());
+            w.show_sidebar(on);
+        });
+        self.window.add_action(&sidebar);
+
+        // A place from the menu bar's Go menu, by URI.
+        let go_uri = gio::SimpleAction::new("go-uri", Some(glib::VariantTy::STRING));
+        let weak = Rc::downgrade(self);
+        go_uri.connect_activate(move |_, uri| {
+            if let (Some(w), Some(uri)) = (weak.upgrade(), uri.and_then(|v| v.str())) {
+                log(&format!("action go-uri {uri}"));
+                w.go(gio::File::for_uri(uri));
+            }
+        });
+        self.window.add_action(&go_uri);
+    }
+
+    /// Show Sidebar off: the folder takes the width, and the window buttons
+    /// stay at the left of the title bar.
+    fn show_sidebar(&self, on: bool) {
+        self.sidebar.widget.set_visible(on);
+        self.body_sep.set_visible(on);
+        self.chrome_sep.set_visible(on);
+        // The band keeps the sidebar's width through the size group.
+        if on {
+            self.band.set_width_request(SIDEBAR_WIDTH);
+            self.band.remove_css_class("files-no-sidebar");
+            self.sidebar_width.add_widget(&self.band);
+        } else {
+            self.sidebar_width.remove_widget(&self.band);
+            self.band.set_width_request(-1);
+            self.band.add_css_class("files-no-sidebar");
+        }
     }
 
     /// Files Settings' Show hidden files, applied to this window.
