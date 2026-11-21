@@ -228,6 +228,24 @@ impl Config {
             .any(|f| f.fingerprint.eq_ignore_ascii_case(fingerprint))
     }
 
+    /// Add this device to Favorites, if it is not already, and turn on
+    /// Automatically Accept from Favorites. Used when the person chooses
+    /// Always accept from this device on an incoming request.
+    pub fn remember_favorite(&mut self, fingerprint: &str, alias: &str) {
+        if !self.is_favorite(fingerprint) {
+            let alias = if alias.trim().is_empty() {
+                fingerprint.chars().take(8).collect()
+            } else {
+                alias.to_owned()
+            };
+            self.favorites.push(Favorite {
+                fingerprint: fingerprint.to_owned(),
+                alias,
+            });
+        }
+        self.auto_accept_favorites = true;
+    }
+
     /// Whether a request from `fingerprint` is turned away before anyone
     /// is asked: receiving is off, or only favorites may send.
     pub fn declines(&self, fingerprint: &str) -> bool {
@@ -365,6 +383,22 @@ mod tests {
         assert!(c.asks("AB12"));
         c.receive = false;
         assert!(c.declines("AB12"));
+    }
+
+    #[test]
+    fn always_accept_adds_a_favorite_and_stops_asking() {
+        let mut c = Config::default();
+        assert!(c.asks("ab12"));
+        c.remember_favorite("AB12", "Phone");
+        assert!(c.is_favorite("ab12"));
+        assert_eq!(c.favorites[0].alias, "Phone");
+        assert!(c.auto_accept_favorites);
+        assert!(!c.asks("AB12"));
+        c.remember_favorite("ab12", "Other name");
+        assert_eq!(c.favorites.len(), 1);
+        assert_eq!(c.favorites[0].alias, "Phone");
+        c.remember_favorite("ff00", "");
+        assert_eq!(c.favorites[1].alias, "ff00");
     }
 
     #[test]

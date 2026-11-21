@@ -344,6 +344,24 @@ pub fn answer(id: &str, decision: Decision) {
     }
 }
 
+/// Accept this request, add the sender to Favorites, and turn on
+/// Automatically Accept from Favorites, so later files from this device
+/// are saved without asking. Works from the request dialog while Files
+/// is only running as the LocalSend daemon.
+pub fn always_accept(id: &str) {
+    let Some(request) = find(id) else {
+        return;
+    };
+    if request.state() != State::Waiting {
+        return;
+    }
+    super::always_accept_from(
+        &request.incoming.sender.fingerprint,
+        &request.incoming.sender.alias,
+    );
+    answer(id, Decision::Accept);
+}
+
 /// Stop a transfer under way.
 pub fn stop(id: &str) {
     let Some(request) = find(id) else {
@@ -525,6 +543,7 @@ struct Sheet {
     window: gtk::Window,
     status: gtk::Label,
     progress: gtk::ProgressBar,
+    always: gtk::Button,
     buttons: gtk::Box,
     shown: RefCell<Option<State>>,
     _hold: gio::ApplicationHoldGuard,
@@ -573,21 +592,37 @@ impl Sheet {
         }
         let status = label("", &["files-dim", "files-ls-status"]);
         let progress = gtk::ProgressBar::builder().visible(false).build();
+        let always = gtk::Button::with_label(&tr("Always accept from this device"));
+        always.add_css_class("flat");
+        always.set_halign(gtk::Align::Start);
+        always.set_hexpand(true);
+        always.set_visible(false);
+        always.set_tooltip_text(Some(&tr(
+            "Add this device to Favorites and automatically accept files from favorites.",
+        )));
+        let always_id = request.id().to_owned();
+        always.connect_clicked(move |_| always_accept(&always_id));
         let buttons = gtk::Box::builder()
             .spacing(8)
             .halign(gtk::Align::End)
+            .build();
+        let actions = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
             .sensitive(false)
             .build();
+        actions.append(&always);
+        actions.append(&buttons);
         body.append(&status);
         body.append(&progress);
-        body.append(&buttons);
+        body.append(&actions);
         window.set_child(Some(&body));
         guard_keys(&window);
         // A click as it appears is not an answer either.
-        let b = buttons.downgrade();
+        let a = actions.downgrade();
         glib::timeout_add_local_once(ARM_AFTER, move || {
-            if let Some(b) = b.upgrade() {
-                b.set_sensitive(true);
+            if let Some(a) = a.upgrade() {
+                a.set_sensitive(true);
             }
         });
         Rc::new(Self {
@@ -595,6 +630,7 @@ impl Sheet {
             window,
             status,
             progress,
+            always,
             buttons,
             shown: RefCell::default(),
             _hold: app.hold(),
@@ -629,6 +665,7 @@ impl Sheet {
         }
         self.shown.replace(Some(state.clone()));
         self.clear_buttons();
+        self.always.set_visible(false);
         let id = self.request.id().to_owned();
         let w = self.window.downgrade();
         let close = move || {
@@ -638,6 +675,7 @@ impl Sheet {
         };
         match state {
             State::Waiting => {
+                self.always.set_visible(true);
                 // Hides it; it still waits on the LocalSend page.
                 let later = button(&tr("Later"), Some("flat"), close.clone());
                 later.set_tooltip_text(Some(&tr("Answer later from LocalSend in Files")));
@@ -979,6 +1017,14 @@ impl Card {
         };
         match state {
             State::Waiting => {
+                let a = id.clone();
+                let always = button(&tr("Always accept from this device"), Some("flat"), move || {
+                    always_accept(&a)
+                });
+                always.set_tooltip_text(Some(&tr(
+                    "Add this device to Favorites and automatically accept files from favorites.",
+                )));
+                self.buttons.append(&always);
                 let a = id.clone();
                 self.buttons.append(&button(&tr("Decline"), None, move || {
                     answer(&a, Decision::Decline)

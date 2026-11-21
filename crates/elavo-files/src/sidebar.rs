@@ -1330,30 +1330,48 @@ impl Sidebar {
         }
     }
 
-    /// Right click on a device nearby: add it to, or remove it from, the
-    /// LocalSend Favorites System Settings' Sharing page lists.
+    /// Right click, or a long press on a touchscreen, on a device nearby:
+    /// add it to, or remove it from, the LocalSend Favorites System
+    /// Settings' Sharing page lists.
     fn device_menu_on(&self, row: &gtk::ListBoxRow, uri: &str) {
+        let open = {
+            let weak = self.me.borrow().clone();
+            let uri = uri.to_owned();
+            move |widget: gtk::Widget, x: f64, y: f64| {
+                let Some(s) = weak.upgrade() else {
+                    return;
+                };
+                s.menu_uri.replace(uri.clone());
+                let fingerprint = uri.rsplit('/').next().unwrap_or_default();
+                let label = if crate::localsend::is_favorite(fingerprint) {
+                    tr("Remove from LocalSend Favorites")
+                } else {
+                    tr("Add to LocalSend Favorites")
+                };
+                let menu = gio::Menu::new();
+                menu.append(Some(&label), Some("sidebar.ls-favorite"));
+                s.show_menu(&menu, &widget, x, y);
+            }
+        };
         let click = gtk::GestureClick::builder()
             .button(gdk::BUTTON_SECONDARY)
             .build();
-        let (weak, uri) = (self.me.borrow().clone(), uri.to_owned());
+        let open_click = open.clone();
         click.connect_pressed(move |g, _, x, y| {
             g.set_state(gtk::EventSequenceState::Claimed);
-            let (Some(s), Some(w)) = (weak.upgrade(), g.widget()) else {
-                return;
-            };
-            s.menu_uri.replace(uri.clone());
-            let fingerprint = uri.rsplit('/').next().unwrap_or_default();
-            let label = if crate::localsend::is_favorite(fingerprint) {
-                tr("Remove from LocalSend Favorites")
-            } else {
-                tr("Add to LocalSend Favorites")
-            };
-            let menu = gio::Menu::new();
-            menu.append(Some(&label), Some("sidebar.ls-favorite"));
-            s.show_menu(&menu, &w, x, y);
+            if let Some(w) = g.widget() {
+                open_click(w, x, y);
+            }
         });
         row.add_controller(click);
+        let press = gtk::GestureLongPress::builder().touch_only(true).build();
+        press.connect_pressed(move |g, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(w) = g.widget() {
+                open(w, x, y);
+            }
+        });
+        row.add_controller(press);
     }
 
     /// Highlight the row for `uri`, or none when it is not in the sidebar.

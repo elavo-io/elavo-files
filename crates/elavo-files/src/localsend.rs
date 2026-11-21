@@ -185,6 +185,14 @@ pub fn is_favorite(fingerprint: &str) -> bool {
     config().is_favorite(fingerprint)
 }
 
+/// Add this device to Favorites and turn on Automatically Accept from
+/// Favorites, then used from Always accept from this device.
+pub fn always_accept_from(fingerprint: &str, alias: &str) {
+    let mut c = config();
+    c.remember_favorite(fingerprint, alias);
+    configure(c);
+}
+
 /// Add a device nearby to the Favorites, or take it off.
 pub fn toggle_favorite(fingerprint: &str) {
     let mut c = config();
