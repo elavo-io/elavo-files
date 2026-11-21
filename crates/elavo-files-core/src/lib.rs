@@ -19,6 +19,7 @@ pub mod naming;
 pub mod ops;
 pub mod places;
 pub mod prefs;
+pub mod secret;
 pub mod servers;
 pub mod sort;
 pub mod trash;

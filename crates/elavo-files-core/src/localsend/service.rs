@@ -353,8 +353,12 @@ mod tests {
             alias: name.into(),
             custom_alias: None,
             receive: true,
+            favorites_only: false,
+            auto_accept_favorites: true,
+            favorites: Vec::new(),
             save_folder: dir.join("in"),
             require_approval: approval,
+            require_pin: !pin.is_empty(),
             pin: pin.into(),
             port,
             https,
@@ -476,6 +480,31 @@ mod tests {
     #[test]
     fn sends_and_receives_over_https() {
         send_both_ways(true, 53417);
+    }
+
+    #[test]
+    fn favorites_only_turns_others_away_and_takes_favorites_unasked() {
+        let (a, a_rx, a_dir) = start("fav-a", 53431, false, false, "");
+        let (b, _b_rx, b_dir) = start("fav-b", 53432, false, true, "");
+        std::fs::create_dir_all(a_dir.join("out")).unwrap();
+        std::fs::write(a_dir.join("out/f.txt"), b"fav").unwrap();
+        let mut c = b.config();
+        c.favorites_only = true;
+        b.configure(c.clone());
+        // A is not a favorite: declined without anyone being asked.
+        let id = a.send(device(&b), vec![a_dir.join("out/f.txt")], None);
+        assert_eq!(outcome(&a_rx, &id), SendState::Declined);
+        assert!(!b_dir.join("in/f.txt").exists());
+        // A favorite, with Automatically Accept: saved without asking,
+        // though B asks everyone else.
+        c.favorites.push(super::super::config::Favorite {
+            fingerprint: a.info().fingerprint.unwrap(),
+            alias: "fav-a".into(),
+        });
+        b.configure(c);
+        let id = a.send(device(&b), vec![a_dir.join("out/f.txt")], None);
+        assert_eq!(outcome(&a_rx, &id), SendState::Done);
+        assert_eq!(std::fs::read(b_dir.join("in/f.txt")).unwrap(), b"fav");
     }
 
     #[test]

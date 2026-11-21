@@ -1183,6 +1183,18 @@ impl Sidebar {
             group.add_action(&action);
         };
         add(
+            "ls-favorite",
+            Box::new(|s| {
+                let uri = s.menu_uri.borrow().clone();
+                if let Some(fingerprint) = uri
+                    .strip_prefix(crate::localsend::URI)
+                    .and_then(|rest| rest.strip_prefix("device/"))
+                {
+                    crate::localsend::toggle_favorite(fingerprint);
+                }
+            }),
+        );
+        add(
             "open",
             Box::new(|s| {
                 let uri = s.menu_uri.borrow().clone();
@@ -1313,8 +1325,35 @@ impl Sidebar {
                 tr("drop files here to send them")
             )));
             crate::localsend::take_drops(&row, &d.fingerprint);
+            self.device_menu_on(&row, &uri);
             self.list.append(&row);
         }
+    }
+
+    /// Right click on a device nearby: add it to, or remove it from, the
+    /// LocalSend Favorites System Settings' Sharing page lists.
+    fn device_menu_on(&self, row: &gtk::ListBoxRow, uri: &str) {
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        let (weak, uri) = (self.me.borrow().clone(), uri.to_owned());
+        click.connect_pressed(move |g, _, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            let (Some(s), Some(w)) = (weak.upgrade(), g.widget()) else {
+                return;
+            };
+            s.menu_uri.replace(uri.clone());
+            let fingerprint = uri.rsplit('/').next().unwrap_or_default();
+            let label = if crate::localsend::is_favorite(fingerprint) {
+                tr("Remove from LocalSend Favorites")
+            } else {
+                tr("Add to LocalSend Favorites")
+            };
+            let menu = gio::Menu::new();
+            menu.append(Some(&label), Some("sidebar.ls-favorite"));
+            s.show_menu(&menu, &w, x, y);
+        });
+        row.add_controller(click);
     }
 
     /// Highlight the row for `uri`, or none when it is not in the sidebar.

@@ -132,7 +132,23 @@ fn prepare(
     if !config.receive {
         return empty(403);
     }
-    if !config.pin.is_empty() && req.param("pin") != Some(config.pin.as_str()) {
+    let sender = Device::from_info(&request.info, ip, peer).unwrap_or_else(|| Device {
+        alias: request.info.alias.clone(),
+        model: request.info.device_model.clone(),
+        kind: proto::DeviceType::parse(request.info.device_type.as_deref()),
+        fingerprint: ip.to_owned(),
+        ip: ip.to_owned(),
+        port: request.info.port.unwrap_or(super::DEFAULT_PORT),
+        https: shared.identity.https(),
+        version: request.info.version.clone().unwrap_or_else(|| "1.0".into()),
+    });
+    // Favorites Only: anyone else is turned away before being asked for
+    // a PIN or shown to the person.
+    if config.declines(&sender.fingerprint) {
+        log(&format!("declined {}: not a favorite", sender.alias));
+        return empty(403);
+    }
+    if !config.pin_ok(req.param("pin")) {
         return empty(401);
     }
     if request.files.is_empty()
@@ -144,16 +160,6 @@ fn prepare(
     {
         return empty(400);
     }
-    let sender = Device::from_info(&request.info, ip, peer).unwrap_or_else(|| Device {
-        alias: request.info.alias.clone(),
-        model: request.info.device_model.clone(),
-        kind: proto::DeviceType::parse(request.info.device_type.as_deref()),
-        fingerprint: ip.to_owned(),
-        ip: ip.to_owned(),
-        port: request.info.port.unwrap_or(super::DEFAULT_PORT),
-        https: shared.identity.https(),
-        version: request.info.version.clone().unwrap_or_else(|| "1.0".into()),
-    });
     let files: Vec<_> = request.files.values().cloned().collect();
     let id = proto::random_id();
     let Some(bytes) = files
@@ -182,7 +188,7 @@ fn prepare(
         shared.busy.store(false, Ordering::SeqCst);
         return empty(409);
     }
-    let decision = if config.require_approval {
+    let decision = if config.asks(&sender.fingerprint) {
         let ask_for = Duration::from_secs(u64::from(config.ask_for));
         let (tx, rx) = mpsc::channel();
         shared

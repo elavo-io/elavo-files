@@ -236,8 +236,9 @@ fn sidebar_page() -> gtk::Box {
     page
 }
 
-/// LocalSend: the device's name and how it receives. Meant to move to
-/// System Settings' General section; both would edit `localsend.conf`.
+/// LocalSend: the device's name, a summary of how it receives, and a way
+/// to System Settings' Sharing page, which owns those settings. Both edit
+/// `localsend.conf`.
 fn localsend_page() -> gtk::Box {
     use crate::localsend;
     let c = localsend::config();
@@ -303,16 +304,36 @@ fn localsend_page() -> gtk::Box {
     g.append(&own);
     page.append(&g);
 
+    // Who may send, Favorites, the PIN and the save folder are on System
+    // Settings' Sharing page (General → Sharing), which writes the same
+    // localsend.conf.
     let g = group();
-    g.append(&check(
-        &tr("Receive files from devices nearby"),
-        c.receive,
-        |on| {
-            let mut c = localsend::config();
-            c.receive = on;
-            localsend::configure(c);
-        },
-    ));
+    let summary = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    let show_summary = {
+        let summary = summary.downgrade();
+        move || {
+            let Some(summary) = summary.upgrade() else {
+                return false;
+            };
+            summary.set_label(&localsend::sharing_summary());
+            true
+        }
+    };
+    show_summary();
+    localsend::connect_changed(show_summary);
+    g.append(&summary);
+    let open = gtk::Button::builder()
+        .label(tr("Open Sharing Settings\u{2026}"))
+        .halign(gtk::Align::Start)
+        .build();
+    open.set_visible(localsend::can_open_name_settings());
+    open.connect_clicked(|b| {
+        localsend::open_sharing_settings(b.root().and_downcast::<gtk::Window>().as_ref());
+    });
+    g.append(&open);
     g.append(&check(
         &tr("Ask before accepting files"),
         c.require_approval,
@@ -322,58 +343,6 @@ fn localsend_page() -> gtk::Box {
             localsend::configure(c);
         },
     ));
-    let row = gtk::Box::builder().spacing(10).build();
-    row.append(
-        &gtk::Label::builder()
-            .label(tr("Save files to:"))
-            .xalign(0.0)
-            .build(),
-    );
-    let folder_name = |p: &std::path::Path| {
-        p.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_string_lossy().into_owned())
-    };
-    let folder = gtk::Button::builder()
-        .label(folder_name(&c.save_folder))
-        .tooltip_text(c.save_folder.to_string_lossy())
-        .hexpand(true)
-        .build();
-    folder.connect_clicked(move |b| {
-        let dialog = gtk::FileDialog::builder()
-            .title(tr("Save Files To"))
-            .initial_folder(&gio::File::for_path(localsend::config().save_folder))
-            .modal(true)
-            .build();
-        let parent = b.root().and_downcast::<gtk::Window>();
-        let b = b.clone();
-        dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |r| {
-            if let Some(path) = r.ok().and_then(|f| f.path()) {
-                b.set_label(&folder_name(&path));
-                b.set_tooltip_text(Some(&path.to_string_lossy()));
-                let mut c = localsend::config();
-                c.save_folder = path;
-                localsend::configure(c);
-            }
-        });
-    });
-    row.append(&folder);
-    g.append(&row);
-    let row = gtk::Box::builder().spacing(10).build();
-    row.append(&gtk::Label::builder().label(tr("PIN:")).xalign(0.0).build());
-    let pin = gtk::PasswordEntry::builder()
-        .placeholder_text(tr("None"))
-        .show_peek_icon(true)
-        .hexpand(true)
-        .build();
-    pin.set_text(&c.pin);
-    pin.connect_changed(|e| {
-        let mut c = localsend::config();
-        c.pin = e.text().trim().to_owned();
-        localsend::configure(c);
-    });
-    row.append(&pin);
-    g.append(&row);
     page.append(&g);
     let status = gtk::Label::builder()
         .label(localsend::status())

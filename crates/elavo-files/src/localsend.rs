@@ -53,6 +53,8 @@ struct Ui {
     system_name: RefCell<Option<String>>,
     /// Keeps following hostnamed's name changes.
     name_watch: RefCell<Option<gio::SignalSubscription>>,
+    /// Keeps following localsend.conf.
+    config_watch: RefCell<Option<gio::FileMonitor>>,
     app: glib::WeakRef<gtk::Application>,
 }
 
@@ -77,6 +79,7 @@ pub fn start(app: &gtk::Application) {
         return;
     }
     let mut cfg = config::read();
+    config::resolve_pin(&mut cfg);
     cfg.alias = alias_for(&cfg, None);
     let port = cfg.port;
     let (service, problem) = match Service::start(cfg) {
@@ -119,11 +122,90 @@ pub fn start(app: &gtk::Application) {
             sending: RefCell::default(),
             system_name: RefCell::default(),
             name_watch: RefCell::default(),
+            config_watch: RefCell::default(),
             app: app.downgrade(),
         })))
     });
     requests::init(app);
     watch_name();
+    watch_config();
+}
+
+/// Follow localsend.conf, which System Settings' Sharing page writes, so
+/// its changes apply at once. The PIN is read again from the keyring each
+/// time; Sharing touches the file when it sets one.
+fn watch_config() {
+    let file = gio::File::for_path(config::path());
+    let Ok(monitor) = file.monitor_file(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+    else {
+        return;
+    };
+    let pending = Rc::new(std::cell::Cell::new(false));
+    monitor.connect_changed(move |_, _, _, event| {
+        if !matches!(
+            event,
+            gio::FileMonitorEvent::ChangesDoneHint
+                | gio::FileMonitorEvent::Created
+                | gio::FileMonitorEvent::MovedIn
+                | gio::FileMonitorEvent::Renamed
+                | gio::FileMonitorEvent::Deleted
+        ) || pending.replace(true)
+        {
+            return;
+        }
+        let pending = pending.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+            pending.set(false);
+            reload_config();
+        });
+    });
+    if let Some(u) = ui() {
+        u.config_watch.replace(Some(monitor));
+    }
+}
+
+fn reload_config() {
+    let Some(u) = ui() else {
+        return;
+    };
+    let mut c = config::read();
+    config::resolve_pin(&mut c);
+    c.alias = alias_for(&c, system_name().as_deref());
+    if let Some(s) = &u.service {
+        if s.config() == c {
+            return;
+        }
+        log("localsend: settings changed on disk");
+        s.configure(c);
+    }
+    u.listeners.borrow_mut().retain(|f| f());
+}
+
+pub fn is_favorite(fingerprint: &str) -> bool {
+    config().is_favorite(fingerprint)
+}
+
+/// Add a device nearby to the Favorites, or take it off.
+pub fn toggle_favorite(fingerprint: &str) {
+    let mut c = config();
+    if c.is_favorite(fingerprint) {
+        c.favorites
+            .retain(|f| !f.fingerprint.eq_ignore_ascii_case(fingerprint));
+    } else {
+        let alias = device(fingerprint)
+            .map(|d| d.alias)
+            .unwrap_or_else(|| fingerprint.chars().take(8).collect());
+        c.favorites.push(config::Favorite {
+            fingerprint: fingerprint.to_owned(),
+            alias,
+        });
+    }
+    configure(c);
+}
+
+/// Open System Settings on its Sharing page, where LocalSend is set up.
+pub fn open_sharing_settings(parent: Option<&gtk::Window>) {
+    open_settings_pane("sharing", parent);
 }
 
 /// What other devices see: a name set by hand in localsend.conf, else the
@@ -235,8 +317,12 @@ pub fn use_system_name() {
 
 /// Open System Settings where the computer is named.
 pub fn open_name_settings(parent: Option<&gtk::Window>) {
+    open_settings_pane("about", parent);
+}
+
+fn open_settings_pane(pane: &str, parent: Option<&gtk::Window>) {
     let launch = gio::AppInfo::create_from_commandline(
-        "elavo-system-settings --pane about",
+        format!("elavo-system-settings --pane {pane}"),
         Some("System Settings"),
         gio::AppInfoCreateFlags::NONE,
     )
@@ -340,6 +426,29 @@ pub fn configure(mut c: Config) {
         }
         u.listeners.borrow_mut().retain(|f| f());
     }
+}
+
+/// What System Settings' Sharing page has set, in a sentence.
+pub fn sharing_summary() -> String {
+    let c = config();
+    let from = if !c.receive {
+        tr("Receiving is off.")
+    } else if c.favorites_only {
+        tr("Receiving from favorites only.")
+    } else {
+        tr("Receiving from everyone nearby.")
+    };
+    let pin = if c.require_pin {
+        tr("A PIN is required.")
+    } else {
+        tr("No PIN is required.")
+    };
+    let folder = c
+        .save_folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| c.save_folder.to_string_lossy().into_owned());
+    format!("{from} {pin} {} {folder}.", tr("Files are saved to"))
 }
 
 /// One line on how others see this device.
