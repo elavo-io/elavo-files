@@ -228,6 +228,12 @@ columnview.files-list {
   background: @view_bg_color;
 }
 
+/* Column titles are square. The Elavo theme only zeros the radius on
+   columnview.view > header > button, and List does not use that class. */
+columnview.files-list > header button {
+  border-radius: 0;
+}
+
 columnview.files-list > listview > row {
   min-height: 24px;
 }
