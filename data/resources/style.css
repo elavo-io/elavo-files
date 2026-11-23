@@ -3,17 +3,10 @@
  * layout follows System Settings: a sidebar column with the window buttons
  * over it, and the toolbar over the content. */
 
-/* The sidebar column and its band in the title bar read as one surface,
-   a shade off the content, standing in for Finder's translucent sidebar. */
-.files-sidebar,
-.files-sidebar-band {
-  background-color: alpha(currentColor, 0.05);
-}
-
-.files-sidebar-band {
-  padding: 0 12px;
-  min-height: 52px;
-}
+/* The sidebar column is one surface, a shade off the content. The
+   window-button band has no fill of its own; a second tint would sit
+   on the pane fill and split the band from the list below. Pane fill,
+   padding and radius are under Concentric corners. */
 
 .files-toolbar {
   padding: 8px 10px 8px 12px;
@@ -580,6 +573,9 @@ tooltip.background label {
 .files-sidebar-band {
   min-height: 48px;
   padding: 0 10px;
+  background: none;
+  border: none;
+  box-shadow: none;
 }
 
 .files-sidebar {
