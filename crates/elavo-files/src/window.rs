@@ -1,9 +1,11 @@
-//! A Files window: the sidebar on the left with the window buttons over
-//! it, and on the right a toolbar over the folder, shown as Icons, List,
+//! A Files window: a sidebar column with the window buttons over it, and
+//! on the right a toolbar over the folder, shown as Icons, List,
 //! Columns or Gallery, with an optional preview pane beside Icons and List.
-//! The folder is a monitored `gtk::DirectoryList`, so it follows changes on
-//! disk as they happen. File operations, the context menus, the clipboard,
-//! drag and drop, Rename and Undo are in `fileops.rs`.
+//! The folder is a monitored `gtk::DirectoryList`, so it follows creates
+//! and deletes as they happen. Content writes (a screenshot still being
+//! saved, for example) are followed in `watch.rs`. File operations, the
+//! context menus, the clipboard, drag and drop, Rename and Undo are in
+//! `fileops.rs`.
 
 pub(crate) mod fileops;
 
@@ -30,8 +32,10 @@ use crate::state::{self, Mode, State};
 use crate::titlebox::TitleBox;
 use crate::views::{self, CellHandler, Cells};
 
-/// The sidebar column, shared by its band in the title bar and the list.
+/// The sidebar column, including the window-button band and the list.
 const SIDEBAR_WIDTH: i32 = 200;
+const MIN_WIDTH: i32 = 720;
+const MIN_HEIGHT: i32 = 480;
 
 /// A window action's handler.
 type Handler = Box<dyn Fn(&Rc<Window>)>;
@@ -39,12 +43,13 @@ type Handler = Box<dyn Fn(&Rc<Window>)>;
 pub struct Window {
     pub window: gtk::ApplicationWindow,
     sidebar: Rc<Sidebar>,
-    /// The window buttons over the sidebar, and the lines beside the
-    /// sidebar in the title bar and the body, for Show Sidebar.
+    /// The sidebar column, the window buttons in its band, and the content
+    /// toolbar. Show Sidebar off moves the buttons onto the toolbar.
+    sidebar_col: gtk::Box,
     band: gtk::Box,
-    chrome_sep: gtk::Separator,
+    start_controls: gtk::WindowControls,
+    toolbar: gtk::Box,
     body_sep: gtk::Separator,
-    sidebar_width: gtk::SizeGroup,
     dir: gtk::DirectoryList,
     filter: gtk::CustomFilter,
     grid: gtk::GridView,
@@ -184,6 +189,12 @@ impl Window {
             .default_height(st.height)
             .show_menubar(false)
             .build();
+        window.set_size_request(MIN_WIDTH, MIN_HEIGHT);
+        // The title band lives in each column, so the window has no title bar
+        // of its own. An empty, hidden widget keeps GTK from adding the default one.
+        let hidden_titlebar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        hidden_titlebar.set_visible(false);
+        window.set_titlebar(Some(&hidden_titlebar));
 
         // Title bar: the window buttons over the sidebar, the toolbar over
         // the folder. gtk::WindowControls follows gtk-decoration-layout, so
@@ -311,12 +322,6 @@ impl Window {
         end_controls.set_valign(gtk::Align::Center);
         toolbar.append(&end_controls);
 
-        let chrome = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        chrome.append(&band);
-        let chrome_sep = gtk::Separator::new(gtk::Orientation::Vertical);
-        chrome.append(&chrome_sep);
-        chrome.append(&toolbar);
-        window.set_titlebar(Some(&gtk::WindowHandle::builder().child(&chrome).build()));
 
         // The folder model, shared by both views.
         let show_hidden = Rc::new(Cell::new(st.show_hidden));
@@ -475,10 +480,7 @@ impl Window {
             }),
             cells.clone(),
         );
-        sidebar.widget.set_width_request(SIDEBAR_WIDTH);
-        let columns = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
-        columns.add_widget(&band);
-        columns.add_widget(&sidebar.widget);
+        sidebar.widget.set_hexpand(false);
 
         // Finder's Trash bar, with Empty.
         let trash_box = gtk::Box::builder()
@@ -551,20 +553,40 @@ impl Window {
         overlay.add_overlay(&quicklook.root);
         content.append(&overlay);
 
+        // One sidebar column and one content column, so the window buttons
+        // sit over the sidebar and the two sides cannot drift apart or overlap.
+        let sidebar_col = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .width_request(SIDEBAR_WIDTH)
+            .hexpand(false)
+            .css_classes(["files-sidebar-pane"])
+            .build();
+        sidebar_col.append(&gtk::WindowHandle::builder().child(&band).build());
+        sidebar_col.append(&sidebar.widget);
+
+        let content_col = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        content_col.append(&gtk::WindowHandle::builder().child(&toolbar).build());
+        content_col.append(&content);
+
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        body.append(&sidebar.widget);
+        body.append(&sidebar_col);
         let body_sep = gtk::Separator::new(gtk::Orientation::Vertical);
         body.append(&body_sep);
-        body.append(&content);
+        body.append(&content_col);
         window.set_child(Some(&body));
 
         let this = Rc::new(Self {
             window,
             sidebar,
+            sidebar_col,
             band,
-            chrome_sep,
+            start_controls,
+            toolbar,
             body_sep,
-            sidebar_width: columns.clone(),
             dir,
             filter,
             grid,
@@ -613,6 +635,15 @@ impl Window {
         go_to.replace(Some(Rc::downgrade(&this)));
         let handler: std::rc::Weak<dyn CellHandler> = Rc::downgrade(&this) as _;
         this.cells.set_handler(handler);
+        crate::watch::attach(&this.dir, this.cells.clone());
+        {
+            let weak = Rc::downgrade(&this);
+            this.cells.set_on_refresh(move |info| {
+                if let Some(w) = weak.upgrade() {
+                    w.on_file_refreshed(info);
+                }
+            });
+        }
         let weak = Rc::downgrade(&this);
         this.jobs.set_refocus(move || {
             if let Some(w) = weak.upgrade() {
@@ -877,20 +908,22 @@ impl Window {
     }
 
     /// Show Sidebar off: the folder takes the width, and the window buttons
-    /// stay at the left of the title bar.
+    /// move to the left of the toolbar.
     fn show_sidebar(&self, on: bool) {
-        self.sidebar.widget.set_visible(on);
-        self.body_sep.set_visible(on);
-        self.chrome_sep.set_visible(on);
-        // The band keeps the sidebar's width through the size group.
         if on {
-            self.band.set_width_request(SIDEBAR_WIDTH);
-            self.band.remove_css_class("files-no-sidebar");
-            self.sidebar_width.add_widget(&self.band);
+            if self.start_controls.parent().as_ref() != Some(self.band.upcast_ref()) {
+                self.toolbar.remove(&self.start_controls);
+                self.band.append(&self.start_controls);
+            }
+            self.sidebar_col.set_visible(true);
+            self.body_sep.set_visible(true);
         } else {
-            self.sidebar_width.remove_widget(&self.band);
-            self.band.set_width_request(-1);
-            self.band.add_css_class("files-no-sidebar");
+            if self.start_controls.parent().as_ref() != Some(self.toolbar.upcast_ref()) {
+                self.band.remove(&self.start_controls);
+                self.toolbar.prepend(&self.start_controls);
+            }
+            self.sidebar_col.set_visible(false);
+            self.body_sep.set_visible(false);
         }
     }
 
@@ -928,6 +961,35 @@ impl Window {
         }
         self.pane.set_reveal_child(on);
         self.refresh_pane();
+    }
+
+    /// A listed file finished writing: keep sort order, the preview and
+    /// Quick Look in step with its new size, type and thumbnail.
+    fn on_file_refreshed(self: &Rc<Self>, info: &gio::FileInfo) {
+        let notify = |sel: &gtk::MultiSelection| {
+            if let Some(model) = sel.model() {
+                if let Some(sort) = model.downcast_ref::<gtk::SortListModel>() {
+                    if let Some(sorter) = sort.sorter() {
+                        sorter.changed(gtk::SorterChange::Different);
+                    }
+                }
+            }
+        };
+        notify(&self.grid_sel);
+        notify(&self.list_sel);
+        notify(&self.gallery.sel);
+        if let Some(sorter) = self.list.sorter() {
+            sorter.changed(gtk::SorterChange::Different);
+        }
+        self.refresh_pane();
+        let Some(file) = entry::target(info).or_else(|| entry::file(info)) else {
+            return;
+        };
+        if self.columns.preview.showing(&file) {
+            self.columns.preview.show(&file);
+        }
+        self.gallery.refresh_file(&file);
+        self.quicklook.refresh(&file, info);
     }
 
     /// What the preview pane shows: the selected item, the folder when

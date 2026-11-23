@@ -89,8 +89,8 @@ pub fn read() -> State {
         ),
         show_hidden: f.boolean("View", "ShowHidden").unwrap_or(false),
         show_preview: f.boolean("View", "ShowPreview").unwrap_or(false),
-        width: int("Window", "Width").unwrap_or(1100).clamp(640, 4000),
-        height: int("Window", "Height").unwrap_or(680).clamp(420, 4000),
+        width: int("Window", "Width").unwrap_or(1100).clamp(720, 4000),
+        height: int("Window", "Height").unwrap_or(680).clamp(480, 4000),
     }
 }
 

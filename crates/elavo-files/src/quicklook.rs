@@ -207,6 +207,14 @@ impl QuickLook {
         self.root.set_visible(false);
     }
 
+    /// Reload if `file` is what is open, after it finished writing.
+    pub fn refresh(self: &Rc<Self>, file: &gio::File, info: &gio::FileInfo) {
+        if self.is_open() && self.uri.borrow().as_deref() == Some(file.uri().as_str()) {
+            self.uri.replace(None);
+            self.show(file, info);
+        }
+    }
+
     /// Show `file`, unless it is what is shown already.
     pub fn show(self: &Rc<Self>, file: &gio::File, info: &gio::FileInfo) {
         let uri = file.uri().to_string();

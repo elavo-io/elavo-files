@@ -1018,9 +1018,11 @@ impl Card {
         match state {
             State::Waiting => {
                 let a = id.clone();
-                let always = button(&tr("Always accept from this device"), Some("flat"), move || {
-                    always_accept(&a)
-                });
+                let always = button(
+                    &tr("Always accept from this device"),
+                    Some("flat"),
+                    move || always_accept(&a),
+                );
                 always.set_tooltip_text(Some(&tr(
                     "Add this device to Favorites and automatically accept files from favorites.",
                 )));

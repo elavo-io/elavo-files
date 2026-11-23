@@ -148,10 +148,32 @@ pub async fn texture(
     match run_thumbnailer(&exec, file, mtime).await {
         Some(path) => cached(&path).await,
         None => {
-            FAILED.with(|f| f.borrow_mut().insert(uri));
+            // A write that is still going, or that finished after this
+            // attempt started, should be tried again.
+            let same = file
+                .query_info(
+                    "standard::size,time::modified",
+                    gio::FileQueryInfoFlags::NONE,
+                    gio::Cancellable::NONE,
+                )
+                .ok()
+                .is_some_and(|now| {
+                    entry::size(&now) == entry::size(info) && entry::modified(&now) == mtime
+                });
+            if same {
+                FAILED.with(|f| f.borrow_mut().insert(uri));
+            }
             None
         }
     }
+}
+
+/// Drop a remembered thumbnailer failure, so a file that was still being
+/// written can be tried again once it has its contents.
+pub fn forget_failure(uri: &str) {
+    FAILED.with(|f| {
+        f.borrow_mut().remove(uri);
+    });
 }
 
 struct Thumbnailer {

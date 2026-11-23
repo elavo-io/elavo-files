@@ -418,6 +418,10 @@ impl Preview {
         self.actions.set_visible(false);
     }
 
+    pub fn showing(&self, file: &gio::File) -> bool {
+        self.file.borrow().as_ref().is_some_and(|f| f.equal(file))
+    }
+
     /// "3 items", for a selection of more than one.
     pub fn show_count(&self, n: usize) {
         self.clear();

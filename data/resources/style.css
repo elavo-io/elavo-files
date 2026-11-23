@@ -568,25 +568,26 @@ tooltip.background label {
   color: @theme_fg_color;
 }
 
-/* Concentric corners. The window is 16px round; the sidebar floats 4px
-   inside it, so its corners are 16 - 4 = 12px and the two curves stay
-   parallel. The band in the title bar and the list below are one panel. */
-.files-sidebar-band {
-  margin: 4px 0 0 4px;
-  min-height: 48px;
-  border-radius: 12px 12px 0 0;
+/* Concentric corners. The window is 16px round; the sidebar column floats
+   4px inside it, so its corners are 16 - 4 = 12px and the two curves stay
+   parallel. The window-button band and the list are one panel. */
+.files-sidebar-pane {
+  margin: 4px 0 4px 4px;
+  border-radius: 12px;
   background-color: alpha(currentColor, 0.07);
+}
+
+.files-sidebar-band {
+  min-height: 48px;
+  padding: 0 10px;
 }
 
 .files-sidebar {
-  margin: 0 0 4px 4px;
-  border-radius: 0 0 12px 12px;
-  background-color: alpha(currentColor, 0.07);
+  background: transparent;
 }
 
 /* The 4px gap replaces the hairline beside the panel. */
-.files-sidebar-band + separator,
-.files-sidebar + separator {
+.files-sidebar-pane + separator {
   min-width: 4px;
   background: none;
 }

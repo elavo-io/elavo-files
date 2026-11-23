@@ -252,6 +252,13 @@ impl Gallery {
         self.shown.replace(None);
     }
 
+    /// The large preview follows a file that finished writing.
+    pub fn refresh_file(&self, file: &gio::File) {
+        if self.shown.borrow().as_deref() == Some(file.uri().as_str()) {
+            self.show_selection();
+        }
+    }
+
     pub fn scroll_to(&self, pos: u32) {
         self.strip.scroll_to(pos, gtk::ListScrollFlags::FOCUS, None);
     }

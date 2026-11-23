@@ -190,6 +190,45 @@ pub fn fields<'a>(info: &gio::FileInfo, scratch: &'a mut (String, String)) -> Fi
     }
 }
 
+/// Whether a later query of the same file should replace the listed
+/// attributes: the size, time or type changed after the file first
+/// appeared (a screenshot still being written, for example).
+pub fn stale(listed: &gio::FileInfo, fresh: &gio::FileInfo) -> bool {
+    size(listed) != size(fresh)
+        || modified(listed) != modified(fresh)
+        || content_type(listed) != content_type(fresh)
+}
+
+/// Whether this directory-monitor event means the file's contents may
+/// have changed after it was first listed.
+///
+/// `gtk::DirectoryList` already handles created, deleted, renamed and
+/// `AttributeChanged`. It ignores `Changed` and `ChangesDoneHint`,
+/// which is how a write to an existing name is reported.
+pub fn content_event(event: gio::FileMonitorEvent) -> bool {
+    matches!(
+        event,
+        gio::FileMonitorEvent::Changed | gio::FileMonitorEvent::ChangesDoneHint
+    )
+}
+
+/// Copy a fresh query onto a listed `FileInfo`, keeping `standard::file`
+/// (what `gtk::DirectoryList` stores the file under). Cached Kind text
+/// and other `elavo-files::` values are dropped, so the views read the
+/// new size, type and thumbnail.
+pub fn refresh_from(dest: &gio::FileInfo, fresh: &gio::FileInfo) {
+    let file = dest.attribute_object("standard::file");
+    for ns in ["thumbnail", "elavo-files"] {
+        for attr in dest.list_attributes(Some(ns)) {
+            dest.remove_attribute(&attr);
+        }
+    }
+    fresh.copy_into(dest);
+    if let Some(file) = file {
+        dest.set_attribute_object("standard::file", &file);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +289,75 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn content_writes_are_the_events_directory_list_skips() {
+        use gio::FileMonitorEvent as Event;
+        assert!(content_event(Event::Changed));
+        assert!(content_event(Event::ChangesDoneHint));
+        assert!(!content_event(Event::Created));
+        assert!(!content_event(Event::Deleted));
+        assert!(!content_event(Event::AttributeChanged));
+        assert!(!content_event(Event::MovedIn));
+        assert!(!content_event(Event::Renamed));
+    }
+
+    #[test]
+    fn refresh_from_updates_size_and_type_and_clears_caches() {
+        let dir = std::env::temp_dir().join(format!("elavo-files-refresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"").unwrap();
+        let file = gio::File::for_path(&path);
+        let listed = file
+            .query_info(
+                ATTRIBUTES,
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        listed.set_attribute_object("standard::file", &file);
+        listed.set_attribute_string("elavo-files::kind", "Document");
+        listed.set_attribute_boolean("thumbnail::failed", true);
+        assert_eq!(size(&listed), 0);
+        assert_eq!(kind(&listed), "Document");
+
+        // A 1-by-1 PNG, so the type can become an image once it has bytes.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&path, png).unwrap();
+        let fresh = file
+            .query_info(
+                ATTRIBUTES,
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        assert!(stale(&listed, &fresh));
+        refresh_from(&listed, &fresh);
+        assert_eq!(size(&listed), png.len() as u64);
+        assert!(!listed.boolean("thumbnail::failed"));
+        assert!(listed.attribute_string("elavo-files::kind").is_none());
+        let kept = listed
+            .attribute_object("standard::file")
+            .and_then(|o| o.downcast::<gio::File>().ok())
+            .expect("standard::file is kept");
+        assert!(kept.equal(&file));
+        let kind = kind(&listed);
+        assert_ne!(kind, "Document");
+        let ct = content_type(&listed);
+        assert!(
+            ct.starts_with("image/")
+                || kind.to_lowercase().contains("png")
+                || kind.to_lowercase().contains("image"),
+            "content type {ct}, kind {kind}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

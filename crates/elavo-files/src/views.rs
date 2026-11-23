@@ -70,18 +70,32 @@ pub trait CellHandler {
     fn drop_files(&self, dest: &gio::File, files: Vec<gio::File>, action: gdk::DragAction);
 }
 
+/// How to redraw a bound cell when the file's attributes change later.
+struct Bound {
+    widget: glib::WeakRef<gtk::Widget>,
+    /// A list text column (Size, Kind, Date Modified, Location).
+    text: Option<fn(&gio::FileInfo) -> String>,
+}
+
 /// The cells on screen by file URI, for Rename to find its item, and the
 /// window's handler.
 #[derive(Default)]
 pub struct Cells {
     // Both views bind the same files, so a uri can have a cell in each.
-    widgets: RefCell<HashMap<String, Vec<glib::WeakRef<gtk::Widget>>>>,
+    widgets: RefCell<HashMap<String, Vec<Bound>>>,
     handler: RefCell<Option<Weak<dyn CellHandler>>>,
+    /// After a listed file is refreshed in place, so the window can
+    /// update sort order, the preview and Quick Look.
+    on_refresh: RefCell<Option<Rc<dyn Fn(&gio::FileInfo)>>>,
 }
 
 impl Cells {
     pub fn set_handler(&self, handler: Weak<dyn CellHandler>) {
         self.handler.replace(Some(handler));
+    }
+
+    pub fn set_on_refresh(&self, f: impl Fn(&gio::FileInfo) + 'static) {
+        self.on_refresh.replace(Some(Rc::new(f)));
     }
 
     pub fn handler(&self) -> Option<Rc<dyn CellHandler>> {
@@ -94,7 +108,7 @@ impl Cells {
             .borrow()
             .get(uri)?
             .iter()
-            .filter_map(|w| w.upgrade())
+            .filter_map(|b| b.widget.upgrade())
             .find(|w| w.is_mapped())
     }
 
@@ -105,7 +119,7 @@ impl Cells {
             .iter()
             .flat_map(|(uri, list)| {
                 list.iter()
-                    .filter_map(|w| w.upgrade())
+                    .filter_map(|b| b.widget.upgrade())
                     .filter(|w| w.is_mapped())
                     .map(move |w| (uri.clone(), w))
             })
@@ -113,11 +127,32 @@ impl Cells {
     }
 
     pub fn bind(&self, info: &gio::FileInfo, widget: &gtk::Widget) {
+        self.bind_with(info, widget, None);
+    }
+
+    pub fn bind_text(
+        &self,
+        info: &gio::FileInfo,
+        widget: &gtk::Widget,
+        text: fn(&gio::FileInfo) -> String,
+    ) {
+        self.bind_with(info, widget, Some(text));
+    }
+
+    fn bind_with(
+        &self,
+        info: &gio::FileInfo,
+        widget: &gtk::Widget,
+        text: Option<fn(&gio::FileInfo) -> String>,
+    ) {
         if let Some(file) = entry::file(info) {
             let mut map = self.widgets.borrow_mut();
             let list = map.entry(file.uri().to_string()).or_default();
-            list.retain(|w| w.upgrade().is_some_and(|w| &w != widget));
-            list.push(widget.downgrade());
+            list.retain(|b| b.widget.upgrade().is_some_and(|w| &w != widget));
+            list.push(Bound {
+                widget: widget.downgrade(),
+                text,
+            });
         }
     }
 
@@ -126,11 +161,36 @@ impl Cells {
             let uri = file.uri().to_string();
             let mut map = self.widgets.borrow_mut();
             if let Some(list) = map.get_mut(&uri) {
-                list.retain(|w| w.upgrade().is_some_and(|w| &w != widget));
+                list.retain(|b| b.widget.upgrade().is_some_and(|w| &w != widget));
                 if list.is_empty() {
                     map.remove(&uri);
                 }
             }
+        }
+    }
+
+    /// Redraw every bound cell for `info`, after its attributes changed.
+    pub fn refresh(&self, info: &gio::FileInfo) {
+        let Some(file) = entry::file(info) else {
+            return;
+        };
+        let uri = file.uri().to_string();
+        let bound: Vec<(gtk::Widget, Option<fn(&gio::FileInfo) -> String>)> = self
+            .widgets
+            .borrow()
+            .get(&uri)
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b.widget.upgrade().map(|w| (w, b.text)))
+            .collect();
+        for (widget, text) in bound {
+            if let Some(text) = text {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    label.set_label(&text(info));
+                }
+                continue;
+            }
+            refresh_visual(&widget, info);
         }
     }
 }
@@ -349,6 +409,9 @@ pub fn wire(
 /// size it was loaded for.
 const TEXTURE: &str = "elavo-files::texture";
 const TEXTURE_SIZE: &str = "elavo-files::texture-size";
+/// Bumped when the file's attributes are refreshed, so a thumbnail
+/// started against the earlier, empty file is not applied afterwards.
+const REFRESH_GEN: &str = "elavo-files::refresh-gen";
 
 /// The pixels a picture shown at `size` is loaded at: enough for the
 /// screen's scale and one zoom step, and no more, so a big folder of
@@ -379,11 +442,15 @@ fn load_thumbnail(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
     let want = load_size(image, size);
     let weak = image.downgrade();
     let info = info.clone();
+    let gen = info.attribute_int32(REFRESH_GEN);
     glib::spawn_future_local(async move {
         let wanted = || weak.upgrade().is_some_and(|i| i.widget_name() == uri);
         let Some(texture) = crate::thumbs::texture(&file, Some(&info), want, &wanted).await else {
             return;
         };
+        if info.attribute_int32(REFRESH_GEN) != gen {
+            return;
+        }
         info.set_attribute_object(TEXTURE, &texture);
         info.set_attribute_int32(TEXTURE_SIZE, want);
         if let Some(image) = weak.upgrade().filter(|i| i.widget_name() == uri) {
@@ -436,6 +503,48 @@ pub fn set_icon(image: &gtk::Image, info: &gio::FileInfo, size: i32) {
     if size >= 24 && !entry::is_dir(info) {
         load_thumbnail(image, info, size);
     }
+}
+
+/// Apply a fresh query already copied onto `info`: drop a stale
+/// thumbnail, redraw bound cells, and tell the window.
+pub fn refresh_cells(cells: &Cells, info: &gio::FileInfo) {
+    let gen = info.attribute_int32(REFRESH_GEN).saturating_add(1);
+    info.set_attribute_int32(REFRESH_GEN, gen);
+    if info.has_attribute(TEXTURE) {
+        info.remove_attribute(TEXTURE);
+    }
+    if info.has_attribute(TEXTURE_SIZE) {
+        info.remove_attribute(TEXTURE_SIZE);
+    }
+    cells.refresh(info);
+    if let Some(f) = cells.on_refresh.borrow().clone() {
+        f(info);
+    }
+}
+
+fn refresh_visual(widget: &gtk::Widget, info: &gio::FileInfo) {
+    if let Some(expander) = widget.downcast_ref::<gtk::TreeExpander>() {
+        let Some(content) = expander.child() else {
+            return;
+        };
+        let Some(image) = content.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
+        set_icon(&image, info, image.pixel_size());
+        if let Some(label) = image.next_sibling().and_downcast::<gtk::Label>() {
+            label.set_label(&entry::label(info));
+        }
+        return;
+    }
+    let Some(image) = widget.first_child().and_downcast::<gtk::Image>() else {
+        return;
+    };
+    set_icon(&image, info, image.pixel_size());
+    let text = entry::label(info);
+    if let Some(name) = image.next_sibling().and_downcast::<gtk::Label>() {
+        name.set_label(&text);
+    }
+    widget.set_tooltip_text(Some(&text));
 }
 
 /// Icons view cells: the icon over a name of up to two lines.
@@ -506,7 +615,7 @@ pub fn icons_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory
 
 /// Load a folder's children only when its row is first expanded, so a
 /// list of many folders does not read them all.
-fn watch_expansion(row: &gtk::TreeListRow) {
+fn watch_expansion(row: &gtk::TreeListRow, cells: &Rc<Cells>) {
     // SAFETY: the key holds a plain bool and is only read with that type.
     unsafe {
         if row.data::<bool>("elavo-files-watched").is_some() {
@@ -514,7 +623,8 @@ fn watch_expansion(row: &gtk::TreeListRow) {
         }
         row.set_data("elavo-files-watched", true);
     }
-    row.connect_expanded_notify(|row| {
+    let cells = cells.clone();
+    row.connect_expanded_notify(move |row| {
         if !row.is_expanded() {
             return;
         }
@@ -529,6 +639,7 @@ fn watch_expansion(row: &gtk::TreeListRow) {
         if let (Some(dir), Some(info)) = (dir, info) {
             if dir.file().is_none() {
                 dir.set_file(entry::target(&info).as_ref());
+                crate::watch::attach(&dir, cells.clone());
             }
         }
     });
@@ -573,7 +684,7 @@ pub fn name_factory(size: i32, cells: &Rc<Cells>) -> gtk::SignalListItemFactory 
             return;
         };
         expander.set_list_row(Some(&row));
-        watch_expansion(&row);
+        watch_expansion(&row, &c);
         let Some(info) = row.item().and_downcast::<gio::FileInfo>() else {
             return;
         };
@@ -621,6 +732,7 @@ pub fn text_factory(
         wire(label.upcast_ref(), item, &c, View::List, None);
         item.set_child(Some(&label));
     });
+    let c = cells.clone();
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let (Some(info), Some(label)) = (
@@ -630,6 +742,17 @@ pub fn text_factory(
             return;
         };
         label.set_label(&text(&info));
+        c.bind_text(&info, label.upcast_ref(), text);
+    });
+    let c = cells.clone();
+    factory.connect_unbind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        if let (Some(info), Some(label)) = (
+            item.item().and_then(|o| info_of(&o)),
+            item.child().and_downcast::<gtk::Label>(),
+        ) {
+            c.unbind(&info, label.upcast_ref());
+        }
     });
     factory
 }

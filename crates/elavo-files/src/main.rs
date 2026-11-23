@@ -38,6 +38,7 @@ mod terminal;
 mod thumbs;
 mod titlebox;
 mod views;
+mod watch;
 mod window;
 
 use gtk::glib;

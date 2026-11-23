@@ -308,10 +308,7 @@ fn localsend_page() -> gtk::Box {
     // Settings' Sharing page (General → Sharing), which writes the same
     // localsend.conf.
     let g = group();
-    let summary = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .build();
+    let summary = gtk::Label::builder().xalign(0.0).wrap(true).build();
     let show_summary = {
         let summary = summary.downgrade();
         move || {

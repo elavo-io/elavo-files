@@ -520,6 +520,7 @@ impl Columns {
             if is_folder(&info) {
                 let dir = gtk::DirectoryList::new(Some(entry::ATTRIBUTES), Some(&file));
                 dir.set_monitored(true);
+                crate::watch::attach(&dir, self.cells.clone());
                 let filtered = gtk::FilterListModel::new(Some(dir), Some(self.filter.clone()));
                 let column = self.make_column(&file, &filtered);
                 self.columns.borrow_mut().push(column);
