@@ -421,6 +421,25 @@ pub fn run() -> glib::ExitCode {
             crate::settings::present_tab(parent.as_ref(), "localsend");
         });
         app.add_action(&ls_settings);
+        // Other apps (Notes' Share menu) send files through this action over
+        // D-Bus: `io.elavo.Files` `localsend-send` with the file URIs. It opens
+        // the same device picker as Send with LocalSend… on a selection.
+        let ls_send = gio::SimpleAction::new("localsend-send", Some(glib::VariantTy::STRING_ARRAY));
+        let a = app.downgrade();
+        ls_send.connect_activate(move |_, uris| {
+            let files: Vec<gio::File> = uris
+                .and_then(|v| v.get::<Vec<String>>())
+                .unwrap_or_default()
+                .iter()
+                .map(|uri| gio::File::for_uri(uri))
+                .collect();
+            if files.is_empty() {
+                return;
+            }
+            let parent = a.upgrade().and_then(|a| a.active_window());
+            crate::localsend::pick_and_send(parent.as_ref(), files);
+        });
+        app.add_action(&ls_send);
         add_menu_actions(app);
         crate::menubar::install(app, |app, folder| open_window(app, folder).window.clone());
         app.set_menubar(Some(&crate::menubar::build()));
