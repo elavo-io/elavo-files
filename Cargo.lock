@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "elavo-files"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "elavo-files-core",
  "futures-channel",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "elavo-files-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gio",
  "serde",
